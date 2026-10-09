@@ -46,6 +46,7 @@ Every phase appends here before its commit. Keep entries short and factual.
 | sandbox up.sh | done (cloud part) | 2026-10-09 | infra: up.sh for empty sandbox accounts | `infra/up.sh` deploys whatever is missing in order (credentials and instance profile check, `kb-network`, `kb-data`, write tokens from `~/.config/kb-mcp/write-tokens` or newly generated, a saved database snapshot, the image unless already uploaded for a clean commit, prefix list lookup, removal of a `kb-app` left in `ROLLBACK_COMPLETE`, `kb-app`); `infra/up.sh save` downloads the snapshot. 13 tests with stub `aws`, `deploy.sh` and `push-image.sh`; shellcheck clean. |
 | sandbox PassRole | done (cloud part) | 2026-10-09 | sandbox: default instance profile myS3Role | The second `kb-app` deploy failed with "not authorized to use launch template": `iam:PassRole` denies `EMR_EC2_DefaultRole`. Default profile is now `myS3Role` in `app.yaml`, `deploy.sh` and `up.sh`; deviation 8 and demo step 7 updated for the missing custom metrics. |
 | image modes | done (cloud part) | 2026-10-09 | Dockerfile: code readable by the runtime user | Third `kb-app` deploy: `myS3Role` worked (image and debug logs reached S3), but the restore container failed with `PermissionError: /app/kb/__init__.py`. The laptop checkout has owner-only files (mode 600) and `COPY` keeps modes. The Dockerfile now runs `chmod -R a+rX` on `/app` and the installed `kb` package before `USER 10001`, and the first command as that user imports `kb.cli` and `kb.main`, so the build fails instead of the boot. Test in `tests/test_security.py`. |
+| first deploy | done | 2026-10-09 | infra/up.sh in account 983926826929 | `infra/up.sh` brought up `kb-app` with `myS3Role`: stack created, instance signalled healthy. Encrypted root volume and `cfn-signal` both work. Then verified end to end: `/healthz` through CloudFront (`ok`, semantic mode, both models), a write with a token read from S3 (`created`), a search returning it, and `infra/up.sh save` downloading the snapshot. |
 
 ### Phase 08: interface rows, routes and tests
 
@@ -195,9 +196,9 @@ Added by phases:
 
 ## Open issues
 
-- (Sandbox, 2026-10-08) KMS is list only, so an encrypted root volume may fail at launch with `Client.InternalError`. Fallback: `Encrypted: false` in the launch template (and update `docs/SECURITY_REVIEW.md` limitation 15). Record the outcome of the first real launch here.
+- (Sandbox, 2026-10-08, resolved 2026-10-09) KMS is list only, but the encrypted gp2 root volume launched fine on the first successful `kb-app` deploy; `Encrypted: true` stays.
 - (Sandbox, 2026-10-08, resolved 2026-10-09) `LabInstanceProfile` does not exist here; see deviation 8.
-- (Sandbox, 2026-10-09) Unverified until the first successful `kb-app` deploy: that `cfn-signal` works with `myS3Role` (it is documented to need no credentials), and the KMS question above.
+- (Sandbox, 2026-10-09, resolved 2026-10-09) `cfn-signal` works with `myS3Role` (no IAM permissions needed): the first successful `kb-app` deploy (`infra/up.sh`, image `700b8e8-dirty`) signalled success after `/healthz` answered on the instance.
 - (Sandbox, 2026-10-08) EventBridge is not on the allowed list, so phase 18 (the weekly report Lambda) is likely blocked. Check before starting it.
 - (Sandbox, 2026-10-08) Re-run the ECR and EFS create probes with laptop credentials in phase 00; the probes so far came from the lab terminal role `runserver`.
 - (Sandbox, 2026-10-08) Unverified without AWS: that `docker stop` and instance termination give the container the full 30 seconds (`--stop-timeout 30`), that image download and load plus restore plus model load fit in the 600 second health check grace period, and the compressed image size.
