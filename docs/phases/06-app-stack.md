@@ -21,7 +21,7 @@
    - `AppSg`: ingress TCP 8000 from `AlbSg` only. No port 22.
 4. Load balancer: internet-facing ALB in both public subnets; target group HTTP 8000, target type `instance`, health check `/healthz`, interval 15 s, timeout 5 s, healthy threshold 2, unhealthy threshold 3, matcher 200, deregistration delay 30 s; listener on 80 forwarding to it.
 5. Launch template:
-   - `LabInstanceProfile`; no public IP; `MetadataOptions`: `HttpTokens: required`, `HttpPutResponseHopLimit: 2` (deviation 1 in PROGRESS.md: the container needs the instance role for SSM and S3).
+   - Instance profile from the `InstanceProfileName` parameter, default `EMR_EC2_DefaultRole` (`LabInstanceProfile` does not exist in this sandbox, deviation 8 in PROGRESS.md); no public IP; `MetadataOptions`: `HttpTokens: required`, `HttpPutResponseHopLimit: 2` (deviation 1: the container needs the instance role for S3).
    - Root volume 30 GiB gp2 (the sandbox allows gp2 only, up to 35 GB), encrypted. KMS is list only in this sandbox, so if the launch fails with `Client.InternalError`, set `Encrypted: false` in the launch template, record the change in `docs/PROGRESS.md` (deviations) and `docs/SECURITY_REVIEW.md`, and tell the user.
    - `UserData` inline with `Fn::Base64` + `!Sub` (deviation 2). Remember: inside `!Sub`, a literal shell `${VAR}` must be written `${!VAR}`. The script (`set -euxo pipefail`, log to `/var/log/kb-bootstrap.log`):
      1. `dnf install -y docker aws-cfn-bootstrap cronie`; enable and start `docker` and `crond` (retry: the NAT route can lag the first boot).
@@ -34,8 +34,8 @@
 6. Auto Scaling group `AppAsg`: min 1, max 1, desired 1; both private subnets; target group attached; `HealthCheckType: ELB`, `HealthCheckGracePeriod: 600`. `CreationPolicy` with `ResourceSignal` count 1, timeout `PT15M`. `UpdatePolicy.AutoScalingRollingUpdate`: `MinInstancesInService: 0`, `MaxBatchSize: 1`, `WaitOnResourceSignals: true`, `PauseTime: PT15M`. The image tag appears in the user data, so changing `ImageTag` creates a new launch template version and triggers the rolling replacement.
 7. Outputs: `AlbDnsName`, `AsgName`, `TargetGroupArn`, `LoadBalancerFullName`, `TargetGroupFullName` (the last two are for CloudWatch alarms in phase 15).
 8. Extend `infra/deploy.sh`: `deploy.sh app <ImageTag>` passes `--parameter-overrides ImageTag=<tag>`, prints the ALB DNS name. Add `infra/teardown-app.sh` that deletes only `kb-app` after a confirmation prompt.
-9. Deploy. If the stack fails, read the failure from `describe-stack-events`, and if the instance started, read `/var/log/kb-bootstrap.log` with `aws ssm send-command --document-name AWS-RunShellScript` (works without the Session Manager plugin). If SSM is unavailable, `aws ec2 get-console-output --instance-id <id> --latest` shows cloud-init output. If NAT gateway, `t3.medium` or the encrypted root volume is denied, stop and apply the matching fallback from PLAN.md's risk table only after the user agrees.
-10. **HUMAN (optional):** with the Session Manager plugin installed, `aws ssm start-session --target <instance-id>` to confirm interactive shells work. Record whether it works; if not, note the bastion fallback.
+9. Deploy. If the stack fails, read the failure from `describe-stack-events` (`--query "StackEvents[?contains(ResourceStatus,'FAILED')].[LogicalResourceId,ResourceStatusReason]" --output text`). If the instance started, a failed boot copies its logs to `s3://<bucket>/debug/` (`aws s3 ls s3://<bucket>/debug/`, then `aws s3 cp` the newest `-bootstrap.log` and `-container.log` to stdout); `aws ec2 get-console-output --instance-id <id> --latest` also shows cloud-init output. The instance role has no SSM, so `ssm send-command` and Session Manager do not work (deviation 8). If NAT gateway, `t3.medium` or the encrypted root volume is denied, stop and apply the matching fallback from PLAN.md's risk table only after the user agrees.
+10. Session Manager is not available on the instances (deviation 8); nothing to test.
 
 ## Do not
 
@@ -49,8 +49,8 @@
 - [ ] `aws elbv2 describe-target-health --target-group-arn <arn>` shows one `healthy` target.
 - [ ] `curl -s http://<AlbDnsName>/healthz` returns 200 JSON.
 - [ ] Instance has no public IP (`describe-instances` query on `PublicIpAddress` is null) and `MetadataOptions` shows `required` and hop limit 2.
-- [ ] Via `ssm send-command`: `ls -ld /data` shows a directory owned by uid 10001 (not a mount: `findmnt /data` prints nothing), `ls -l /data/kb.db` exists, and `docker image ls kb-mcp` lists `kb-mcp:<ImageTag>`.
-- [ ] After one write (`POST /api/docs` with a write token), `aws s3api head-object --bucket <bucket> --key snapshots/kb-latest.db.gz` succeeds within about `KB_SNAPSHOT_INTERVAL` + 10 seconds, and the container log has a `snapshot uploaded` line with `key`, `bytes` and `ms`.
-- [ ] ALB DNS name recorded in PROGRESS.md Outputs; Session Manager result recorded.
+- [ ] `/healthz` answering through the ALB shows the image loaded and the app started (no remote shell for a direct `/data` check, deviation 8).
+- [ ] After one write (`POST /api/docs` with a write token), `aws s3api head-object --bucket <bucket> --key snapshots/kb-latest.db.gz` succeeds within about `KB_SNAPSHOT_INTERVAL` + 10 seconds, (the container log is on the instance only, deviation 8).
+- [ ] ALB DNS name recorded in PROGRESS.md Outputs.
 - [ ] Ask the user whether to keep `kb-app` running or delete it with `infra/teardown-app.sh` until the next session.
 - [ ] Phase log updated; commit `phase 06: app stack`.

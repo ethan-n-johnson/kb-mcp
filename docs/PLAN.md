@@ -36,6 +36,8 @@ Probes from the lab terminal role `runserver` on 2026-10-08 showed that `ecr:Cre
 - **Nightly backups** under `backups/` stay as they were (longer history for the disaster planning requirement).
 - The Auto Scaling group still spans both private subnets, so a replacement can land in the other AZ.
 
+**3. Instance role (2026-10-09).** `LabInstanceProfile` does not exist in this sandbox and IAM is read only. The instances use the existing `EMR_EC2_DefaultRole` profile, which allows S3, CloudWatch metrics and `ec2:DescribeTags`, but not SSM Parameter Store or CloudWatch Logs. So the write tokens live in the private data bucket at `config/write-tokens` and the app reads them through the instance role (instead of the SSM SecureString below), container logs stay on the instance instead of going to a CloudWatch log group, and search metrics use `put_metric_data` instead of EMF log lines. Details: deviation 8 in `docs/PROGRESS.md`.
+
 **Trade-offs.** The recovery point is a few seconds (the snapshot interval plus the upload time) instead of zero with EFS; a hard kill with no SIGTERM loses the writes of the last interval, a graceful stop loses none. Multi-AZ is kept: S3 is reachable from both AZs, so a replacement restores wherever it starts. S3 is the durable store, the instance disk is a working copy. Boot takes longer (image download and restore before the app starts). A bad delete is copied into the snapshot within seconds, so recovering from one still uses a nightly backup (`--key backups/...`) or an earlier S3 version of the snapshot. Writes still go through one instance, so the single-writer rule is unchanged.
 
 Updated rows:

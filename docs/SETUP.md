@@ -222,18 +222,51 @@ When any AWS command later fails with `ExpiredToken` or `InvalidClientTokenId`, 
 
 ## Deploy flow (what the phases run)
 
-The phases do these for you; this is the overview. Run from `kb-mcp` in a bash shell (Linux, or the Ubuntu terminal on Windows):
+The phases do these for you; this is the overview. Run from `kb-mcp` in a bash shell (Linux, or the Ubuntu terminal on Windows). Run the commands **one at a time** and check each one finished without an error before the next; pasting the whole block keeps going after a failure.
 
 ```bash
 infra/deploy.sh network          # VPC, subnets, S3 gateway endpoint (phase 01)
 infra/deploy.sh data             # S3 bucket (phase 01)
-# write tokens: the block in docs/phases/01-network-data-stacks.md, step 5 (you run it yourself)
-infra/push-image.sh --build      # build the image, upload it to S3, print the tag (phase 03)
-KB_CLOUDFRONT_PREFIX_LIST_ID=pl-xxxxxxxx KB_ALERT_EMAIL=you@example.com \
-  infra/deploy.sh app <tag>      # NAT, ALB, Auto Scaling, CloudFront, alarms (phases 06, 10, 15)
 ```
 
-Phase 00 finds the CloudFront prefix-list ID and records it in `docs/PROGRESS.md`. To save sandbox credit between sessions, delete only the app stack with `infra/teardown-app.sh`; the network and data stacks keep your data.
+Next, create the write tokens: the block in `docs/phases/01-network-data-stacks.md`, step 5 (you run it yourself). It stores them in the data bucket at `config/write-tokens`; the app instances read them from there because the sandbox instance role cannot read SSM. If you made the tokens in SSM with an older version of that step, the same step has a command that copies them over. Then build and upload the image, keeping the tag it prints:
+
+```bash
+TAG=$(infra/push-image.sh --build)   # build the image, upload it to S3 (phase 03); rebuild after any change under kb/
+echo "$TAG"
+```
+
+Then the app stack. Both variables need real values, not the examples:
+
+- `KB_CLOUDFRONT_PREFIX_LIST_ID`: phase 00 records it in `docs/PROGRESS.md`, or look it up:
+
+  ```bash
+  aws ec2 describe-managed-prefix-lists --region us-east-1 \
+    --filters Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing \
+    --query 'PrefixLists[0].PrefixListId' --output text
+  ```
+
+- `KB_ALERT_EMAIL`: an address you can read; confirm the SNS email it receives.
+
+```bash
+KB_CLOUDFRONT_PREFIX_LIST_ID=pl-xxxxxxxx KB_ALERT_EMAIL=you@example.com \
+  infra/deploy.sh app "$TAG"     # NAT, ALB, Auto Scaling, CloudFront, alarms (phases 06, 10, 15)
+```
+
+The app instances use the existing `EMR_EC2_DefaultRole` instance profile, because the sandbox has no `LabInstanceProfile` and does not allow creating roles. To use another profile (for example `LabInstanceProfile` in Learner Lab), set `KB_INSTANCE_PROFILE=<name>` in front of `infra/deploy.sh app`.
+
+If the app stack fails, show only the failures:
+
+```bash
+aws cloudformation describe-stack-events --region us-east-1 --stack-name kb-app --no-cli-pager \
+  --query "StackEvents[?contains(ResourceStatus,'FAILED')].[LogicalResourceId,ResourceStatusReason]" --output text
+```
+
+The bottom line is the first failure. A stack in `ROLLBACK_COMPLETE` must be deleted before the next try (`aws cloudformation delete-stack --stack-name kb-app`, then `aws cloudformation wait stack-delete-complete --stack-name kb-app`). If the instance itself failed to boot, its logs are in the bucket: `aws s3 ls "s3://$BUCKET/debug/"`, then `aws s3 cp "s3://$BUCKET/debug/<file>" -`.
+
+Never type `<tag>` literally: bash reads `<` as a redirect and fails with `syntax error near unexpected token 'newline'`.
+
+To save sandbox credit between sessions, delete only the app stack with `infra/teardown-app.sh`; the network and data stacks keep your data.
 
 ---
 
@@ -248,10 +281,18 @@ Phase 00 finds the CloudFront prefix-list ID and records it in `docs/PROGRESS.md
 | `AccessDenied` on a service | The sandbox blocks it (ECR and EFS are blocked by design); see "Open issues" in `docs/PROGRESS.md` |
 | `permission denied ... docker.sock` (Linux) | You are not in the `docker` group yet: `sudo usermod -aG docker "$USER"`, then log out and in |
 | `Cannot connect to the Docker daemon` (Windows) | Start Docker Desktop and check WSL integration for Ubuntu is on |
+| `bash: infra/deploy.sh: Permission denied` | Scripts lost their executable bit (folder was copied, not cloned): `chmod +x infra/*.sh infra/scripts/*.sh` |
+| `cfn-lint not found` | Project virtualenv missing: Linux step 6 |
+| `docker: command not found` | Docker not installed: Linux step 3 (Fedora has its own commands) |
+| `fatal: not a git repository` from `push-image.sh` | The folder has no `.git`: Linux step 5 |
+| `Invalid IAM Instance Profile name` when deploying the app stack | The profile does not exist in this sandbox. The default is `EMR_EC2_DefaultRole`; check with `aws iam list-instance-profiles --query 'InstanceProfiles[].InstanceProfileName'` and set `KB_INSTANCE_PROFILE` |
+| `config/write-tokens is missing` in the debug boot log | Step 5 of phase 01 was not run (or wrote to SSM only): run it, then redeploy |
+| AWS CLI output opens in a pager and stops at `:` | Press `q`; turn the pager off once with `aws configure set cli_pager ""` |
+| `syntax error near unexpected token 'newline'` | A placeholder like `<tag>` was typed literally: use the real tag, or `"$TAG"` |
 | `$'\r': command not found` running a script | Windows line endings: `git config --global core.autocrlf input`, then re-clone inside WSL |
 
 ## Keep credentials safe
 
 - Never put credentials or write tokens in the repo, in chat messages or in screenshots.
 - `~/.aws/credentials` lives outside the repo, so git never sees it.
-- Lab credentials expire on their own; the write tokens in SSM do not, so revoke the `demo` token after the presentation (phase 17).
+- Lab credentials expire on their own; the write tokens in the bucket do not, so revoke the `demo` token after the presentation (phase 17).

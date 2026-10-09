@@ -78,7 +78,7 @@ def of_type(resources: dict[str, Any], rtype: str) -> dict[str, Any]:
 # --- user data ----------------------------------------------------------------------------
 
 PSEUDO = {"AWS::Region": "us-east-1", "AWS::StackName": "kb-app"}
-PARAMETER_VALUES = {"ImageTag": "abc1234", "MetricsMode": "emf", "ExtensionOrigin": ""}
+PARAMETER_VALUES = {"ImageTag": "abc1234", "MetricsMode": "api", "ExtensionOrigin": ""}
 
 
 def user_data_parts(resources: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -120,7 +120,7 @@ def test_literal_shell_braces_are_escaped(resources: dict[str, Any]) -> None:
         assert name in known, f"${{{name}}} would be read by Fn::Sub; escape it as ${{!{name}}}"
     escaped = set(re.findall(r"\$\{!([^}]+)\}", template))
     # The shell expansions this script relies on.
-    assert {"id_args[@]", "LOG_OPTS[@]", "aws:AutoScalingGroupName", "aws:InstanceId"} <= escaped
+    assert {"id_args[@]", "LOG_OPTS[@]", "INSTANCE_ID:-unknown", "aws:AutoScalingGroupName", "aws:InstanceId"} <= escaped
     rendered = render_user_data(resources)
     assert "${!" not in rendered and 'cfn-signal -e "$STATUS" "${id_args[@]}"' in rendered
 
@@ -155,23 +155,49 @@ def test_shell_scripts_are_executable_and_have_no_trailing_junk() -> None:
         assert path.read_text(encoding="utf-8").startswith("#!/usr/bin/env bash\n")
 
 
-def test_container_logs_go_to_cloudwatch_with_awslogs(resources: dict[str, Any]) -> None:
+def test_container_logs_stay_on_the_instance(resources: dict[str, Any]) -> None:
+    """Deviation 8: the sandbox instance role cannot write CloudWatch Logs, so no awslogs driver."""
     rendered = render_user_data(resources)
-    for flag in (
-        "--log-driver awslogs",
-        "--log-opt awslogs-region=us-east-1",
-        "--log-opt awslogs-group=VALUE_LOGGROUPNAME",
-        '--log-opt "awslogs-stream=$INSTANCE_ID"',
-        "--log-opt awslogs-format=json/emf",
-    ):
+    for flag in ("--log-driver local", "--log-opt max-size=10m", "--log-opt max-file=5"):
         assert flag in rendered, flag
+    assert "awslogs" not in rendered
     # The array is built before the container starts and is what docker run receives.
     assert rendered.index("LOG_OPTS=(") < rendered.index("docker run -d --name kb")
     assert '"${LOG_OPTS[@]}"' in rendered
-    assert "-e KB_METRICS_MODE=emf" in rendered
+    assert "-e KB_METRICS_MODE=api" in rendered
     assert "LOG_OPTS=()" not in rendered
-    template, variables = user_data_parts(resources)
-    assert variables["LogGroupName"] == {"Ref": "AppLogGroup"}  # also makes the group exist first
+    assert of_type(resources, "AWS::Logs::LogGroup") == {}
+
+
+def test_instance_profile_is_a_parameter_defaulting_to_the_sandbox_role(app: dict[str, Any]) -> None:
+    data = app["Resources"]["LaunchTemplate"]["Properties"]["LaunchTemplateData"]
+    assert data["IamInstanceProfile"] == {"Name": {"Ref": "InstanceProfileName"}}
+    param = app["Parameters"]["InstanceProfileName"]
+    assert param["Default"] == "EMR_EC2_DefaultRole"
+    for name in ("EMR_EC2_DefaultRole", "LabInstanceProfile", "my-role.v2"):
+        assert re.fullmatch(param["AllowedPattern"], name), name
+    for bad in ("", "a b", "role;rm", "x" * 129):
+        assert not re.fullmatch(param["AllowedPattern"], bad), bad
+
+
+def test_failed_boot_copies_its_logs_to_s3(resources: dict[str, Any]) -> None:
+    rendered = render_user_data(resources)
+    body = rendered.split("signal_stack() {", 1)[1].split("trap signal_stack EXIT", 1)[0]
+    assert 'if [ "$STATUS" -ne 0 ]; then' in body
+    assert 'debug="s3://VALUE_BUCKET/debug/${INSTANCE_ID:-unknown}-' in body
+    assert 'aws s3 cp /var/log/kb-bootstrap.log "$debug-bootstrap.log"' in body
+    assert 'aws s3 cp /var/log/kb-container.log "$debug-container.log"' in body
+    # The copy happens before the signal, and a failed copy never blocks the signal.
+    assert body.index("aws s3 cp") < body.index("cfn-signal")
+    assert all(line.rstrip().endswith("|| true") for line in body.splitlines() if "aws s3 cp" in line)
+
+
+def test_user_data_checks_the_tokens_object_before_starting_the_app(resources: dict[str, Any]) -> None:
+    rendered = render_user_data(resources)
+    flat = rendered.replace("\\\n", "")
+    assert re.search(r"retry 3 10 aws s3api head-object --bucket VALUE_BUCKET\s+--key config/write-tokens", flat)
+    assert flat.index("head-object") < flat.index("docker run -d --name kb")
+    assert "-e KB_TOKENS_SOURCE=s3" in flat
 
 
 def test_cloudwatch_agent_is_installed_and_configured(resources: dict[str, Any]) -> None:
@@ -226,7 +252,7 @@ def test_new_parameters_have_no_defaults_and_validate_their_input(app: dict[str,
     assert re.fullmatch(email["AllowedPattern"], "ethan@example.com")
     for bad in ("ethan", "ethan@example", "a@b.c,d@e.f", "a b@c.de", ""):
         assert not re.fullmatch(email["AllowedPattern"], bad), bad
-    assert params["MetricsMode"]["Default"] == "emf" and params["MetricsMode"]["AllowedValues"] == ["emf", "api"]
+    assert params["MetricsMode"]["Default"] == "api" and params["MetricsMode"]["AllowedValues"] == ["emf", "api"]
 
 
 # --- phase 10: CloudFront and the locked ALB ----------------------------------------------
@@ -310,12 +336,10 @@ def test_outputs(app: dict[str, Any]) -> None:
         assert kept in out
 
 
-# --- phase 15: log group, topic, alarms ---------------------------------------------------
+# --- phase 15: topic, alarms --------------------------------------------------------------
 
 
-def test_log_group_and_topic(resources: dict[str, Any]) -> None:
-    group = resources["AppLogGroup"]["Properties"]
-    assert (group["LogGroupName"], group["RetentionInDays"]) == ("/kb/app", 14)
+def test_alert_topic(resources: dict[str, Any]) -> None:
     topic = resources["AlertTopic"]["Properties"]
     assert topic["Subscription"] == [{"Protocol": "email", "Endpoint": {"Ref": "AlertEmail"}}]
 
@@ -523,7 +547,7 @@ def test_user_data_loads_the_image_from_s3_not_a_registry(resources: dict[str, A
     assert "retry 5 10 load_image" in rendered
     assert "docker pull" not in rendered and "docker login" not in rendered and "docker tag" not in rendered
     template, variables = user_data_parts(resources)
-    assert set(variables) == {"Bucket", "LogGroupName"}
+    assert set(variables) == {"Bucket"}
     assert variables["Bucket"] == {"Fn::ImportValue": "kb-BucketName"}
 
 
@@ -677,16 +701,27 @@ def test_deploy_app_passes_all_parameters_to_cloudformation(stub_bin: Path) -> N
         "ImageTag=abc1234",
         "CloudFrontPrefixListId=pl-3b927c52",
         "AlertEmail=me@example.com",
-        "MetricsMode=emf",
+        "MetricsMode=api",
+        "InstanceProfileName=EMR_EC2_DefaultRole",
         "ExtensionOrigin=",
     ]
     assert any("DistributionDomainName" in c for c in calls(stub_bin))
 
 
 def test_deploy_app_passes_a_metrics_mode_override(stub_bin: Path) -> None:
-    env = {"KB_CLOUDFRONT_PREFIX_LIST_ID": "pl-1", "KB_ALERT_EMAIL": "me@example.com", "KB_METRICS_MODE": "api"}
+    env = {"KB_CLOUDFRONT_PREFIX_LIST_ID": "pl-1", "KB_ALERT_EMAIL": "me@example.com", "KB_METRICS_MODE": "emf"}
     run_script(DEPLOY, ["app", "abc1234"], stub_bin, env)
-    assert "MetricsMode=api" in next(c for c in calls(stub_bin) if "cloudformation deploy" in c)
+    assert "MetricsMode=emf" in next(c for c in calls(stub_bin) if "cloudformation deploy" in c).split()
+
+
+def test_deploy_app_passes_an_instance_profile_override(stub_bin: Path) -> None:
+    env = {
+        "KB_CLOUDFRONT_PREFIX_LIST_ID": "pl-1", "KB_ALERT_EMAIL": "me@example.com",
+        "KB_INSTANCE_PROFILE": "LabInstanceProfile",
+    }
+    run_script(DEPLOY, ["app", "abc1234"], stub_bin, env)
+    deploy = next(c for c in calls(stub_bin) if "cloudformation deploy" in c)
+    assert "InstanceProfileName=LabInstanceProfile" in deploy.split()
 
 
 def test_deploy_app_passes_the_extension_origin_when_set(stub_bin: Path) -> None:

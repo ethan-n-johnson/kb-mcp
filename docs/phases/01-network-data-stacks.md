@@ -27,15 +27,25 @@ Deploy `kb-network` and `kb-data` with CloudFormation, and create the write-toke
    - Export: `kb-BucketName`.
 3. `infra/deploy.sh` helper: `deploy.sh network` and `deploy.sh data` run `cfn-lint`, `aws cloudformation validate-template`, then `aws cloudformation deploy --stack-name kb-<name> --template-file infra/<name>.yaml --no-fail-on-empty-changeset --tags Project=kb-mcp`. Leave a clear spot for `app` (phase 06). `set -euo pipefail`.
 4. Deploy `kb-network`, then `kb-data`. If a resource is denied, stop, record it, and ask the user before changing the design.
-5. **HUMAN:** create the token parameter so the secret never appears in Sonnet's transcript. Give the user this block to run in their own terminal:
+5. **HUMAN:** store the write tokens in the data bucket so the secret never appears in Sonnet's transcript. The app instances read them from `s3://<bucket>/config/write-tokens`, because the sandbox instance role cannot read SSM (deviation 8 in `docs/PROGRESS.md`). Give the user this block to run in their own terminal:
 
    ```bash
+   BUCKET=$(aws cloudformation list-exports --region us-east-1 \
+     --query "Exports[?Name=='kb-BucketName'].Value" --output text)
    TOKENS="temp:$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))'),demo:$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
-   aws ssm put-parameter --name /kb/write-tokens --type SecureString --value "$TOKENS" --region us-east-1
+   printf '%s' "$TOKENS" | aws s3 cp - "s3://$BUCKET/config/write-tokens" --sse AES256 --region us-east-1
    echo "$TOKENS"   # copy both tokens into a password manager, then clear the terminal
    ```
 
-6. Verify the parameter exists without decrypting it: `aws ssm get-parameter --name /kb/write-tokens --query Parameter.Type` returns `"SecureString"`.
+   If the tokens were already created in SSM by an earlier version of this step, copy them instead of making new ones:
+
+   ```bash
+   aws ssm get-parameter --name /kb/write-tokens --with-decryption --region us-east-1 \
+     --query Parameter.Value --output text | tr -d '\n' \
+     | aws s3 cp - "s3://$BUCKET/config/write-tokens" --sse AES256 --region us-east-1
+   ```
+
+6. Verify the object exists without printing it: `aws s3api head-object --bucket "$BUCKET" --key config/write-tokens --query '[ContentLength,ServerSideEncryption]'` shows a length above 0 and `"AES256"`.
 7. Record the VPC ID and bucket name in the Outputs table of `docs/PROGRESS.md`.
 
 ## Do not
@@ -51,5 +61,5 @@ Deploy `kb-network` and `kb-data` with CloudFormation, and create the write-toke
 - [ ] `aws cloudformation list-exports --query "Exports[?starts_with(Name,'kb-')].Name"` lists all 8 exports (7 from `kb-network`, `kb-BucketName` from `kb-data`).
 - [ ] `aws s3api get-bucket-lifecycle-configuration --bucket <name> --query 'Rules[].ID'` lists `expire-noncurrent-versions`, `expire-backups`, `expire-images` and `abort-incomplete-uploads`.
 - [ ] `aws s3api get-bucket-versioning --bucket <name>` returns `Enabled`; `aws s3api get-public-access-block --bucket <name>` shows all four true.
-- [ ] Token parameter type is `SecureString`.
+- [ ] `s3://<bucket>/config/write-tokens` exists and is encrypted (`AES256`).
 - [ ] Phase log updated; commit `phase 01: network and data stacks`.

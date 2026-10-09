@@ -4,11 +4,13 @@
 
 ## Goal
 
-Container logs in CloudWatch Logs, search metrics from the phase 07 EMF lines, host memory and disk metrics, alarms, and email alerts through SNS. The keyword-mode alarm email is part of demo step 7.
+Search metrics, host memory and disk metrics, alarms, and email alerts through SNS. The keyword-mode alarm email is part of demo step 7.
+
+**Sandbox (deviation 8 in PROGRESS.md):** the instance role cannot write CloudWatch Logs, so there is no log group and no `awslogs` driver. Container logs stay on the instance (Docker `local` driver), and search metrics are sent with `put_metric_data` (`MetricsMode=api`, the default). Tasks 1, 2, 3 and 4a below describe the original design and are replaced by that.
 
 ## Read first
 
-- `CLAUDE.md`, `docs/PROGRESS.md` (deviation 3)
+- `CLAUDE.md`, `docs/PROGRESS.md` (deviations 3 and 8)
 - `docs/PLAN.md`: the metrics paragraph in "Search", Monitoring row in "Course alignment"
 
 ## Tasks
@@ -35,14 +37,13 @@ Container logs in CloudWatch Logs, search metrics from the phase 07 EMF lines, h
 
 ## Do not
 
-- Create IAM roles or policies (LabRole already has CloudWatch permissions; if a call is denied, record it and ask).
+- Create IAM roles or policies (IAM is read only; `EMR_EC2_DefaultRole` has `cloudwatch:PutMetricData`; if a call is denied, record it and ask).
 - Alarm on things the demo deliberately triggers without saying so in the alarm description.
 
 ## Acceptance
 
-- [ ] `aws logs tail /kb/app --since 10m` shows JSON log lines from the container.
 - [ ] `aws cloudwatch list-metrics --namespace KbMcp` and `--namespace CWAgent` both return metrics.
-- [ ] After an upload, the log group has a `snapshot uploaded` event (and no `snapshot failed` events in the last hour).
+- [ ] After an upload, `aws s3api head-object --bucket <bucket> --key snapshots/kb-latest.db.gz` shows a `LastModified` within the last minute.
 - [ ] All six alarms exist and are `OK` (or `INSUFFICIENT_DATA` for the latency one before traffic).
 - [ ] The user received the keyword-mode alarm email and the OK email.
 - [ ] Phase log updated; commit `phase 15: monitoring and alarms`.

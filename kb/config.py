@@ -31,6 +31,8 @@ class Settings:
     model_dir: str = "/models"
     bucket: str | None = None
     tokens_param: str = "/kb/write-tokens"
+    tokens_source: str = "ssm"
+    tokens_key: str = "config/write-tokens"
     aws_region: str = "us-east-1"
     conf_high: float = 0.70
     conf_low: float = 0.30
@@ -62,6 +64,9 @@ class Settings:
         interval = _float(e, "KB_SNAPSHOT_INTERVAL", cls.snapshot_interval)
         if not interval > 0:
             raise ValueError("KB_SNAPSHOT_INTERVAL must be greater than 0 seconds")
+        tokens_source = (e.get("KB_TOKENS_SOURCE") or cls.tokens_source).strip().lower()
+        if tokens_source not in ("ssm", "s3"):
+            raise ValueError("KB_TOKENS_SOURCE must be ssm or s3")
         return cls(
             db_path=e.get("KB_DB") or cls.db_path,
             models_on=(e.get("KB_MODELS") or "on").strip().lower() != "off",
@@ -69,6 +74,8 @@ class Settings:
             model_dir=e.get("KB_MODEL_DIR") or cls.model_dir,
             bucket=e.get("KB_BUCKET") or None,
             tokens_param=e.get("KB_TOKENS_PARAM") or cls.tokens_param,
+            tokens_source=tokens_source,
+            tokens_key=e.get("KB_TOKENS_KEY") or cls.tokens_key,
             aws_region=e.get("AWS_REGION") or cls.aws_region,
             conf_high=_float(e, "KB_CONF_HIGH", cls.conf_high),
             conf_low=_float(e, "KB_CONF_LOW", cls.conf_low),
@@ -124,9 +131,15 @@ def load_write_tokens() -> dict[str, str]:
     """Return write tokens as `{name: secret}`.
 
     If `KB_WRITE_TOKENS` is set it is parsed and AWS is never contacted.
-    Otherwise the SSM SecureString named by `KB_TOKENS_PARAM` is read once
-    (`WithDecryption=True`) and cached for the life of the process. Only token
-    names are logged, never values.
+    Otherwise the tokens are read once and cached for the life of the process,
+    from the source named by `KB_TOKENS_SOURCE`:
+
+    - `ssm` (default): the SecureString named by `KB_TOKENS_PARAM`
+      (`WithDecryption=True`).
+    - `s3`: the object `KB_TOKENS_KEY` in `KB_BUCKET`, for sandboxes whose
+      instance role cannot read SSM (deviation 8 in docs/PROGRESS.md).
+
+    Only token names are logged, never values.
     """
     global _cached_tokens
     with _cache_lock:
@@ -140,10 +153,18 @@ def load_write_tokens() -> dict[str, str]:
             import boto3  # imported lazily so the env path never touches AWS
 
             settings = get_settings()
-            client = boto3.client("ssm", region_name=settings.aws_region)
-            resp = client.get_parameter(Name=settings.tokens_param, WithDecryption=True)
-            tokens = parse_tokens(resp["Parameter"]["Value"])
-            source = "ssm"
+            if settings.tokens_source == "s3":
+                if not settings.bucket:
+                    raise ValueError("KB_TOKENS_SOURCE=s3 needs KB_BUCKET")
+                client = boto3.client("s3", region_name=settings.aws_region)
+                resp = client.get_object(Bucket=settings.bucket, Key=settings.tokens_key)
+                tokens = parse_tokens(resp["Body"].read().decode("utf-8"))
+                source = "s3"
+            else:
+                client = boto3.client("ssm", region_name=settings.aws_region)
+                resp = client.get_parameter(Name=settings.tokens_param, WithDecryption=True)
+                tokens = parse_tokens(resp["Parameter"]["Value"])
+                source = "ssm"
         _cached_tokens = tokens
         log.info(
             "write tokens loaded",

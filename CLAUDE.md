@@ -41,7 +41,7 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 - Every interface (REST, MCP over HTTP, MCP over stdio, UI, extension) calls `kb/service.py`. No business logic in `api.py`, `mcp_tools.py`, `ui.py` or templates.
 - Logs are one JSON object per line. Stdout in server mode; **stderr in stdio MCP mode** (stdout carries the protocol).
 - `GET /healthz` returns 200 whenever the database is readable, including in keyword mode. Model failure must never make the ALB kill the instance.
-- Secrets never go in code, user data, Docker images or git. Write tokens come from SSM `/kb/write-tokens`, or from `KB_WRITE_TOKENS` locally.
+- Secrets never go in code, user data, Docker images or git. Write tokens come from `s3://<bucket>/config/write-tokens` on the instances (`KB_TOKENS_SOURCE=s3`, deviation 8), SSM `/kb/write-tokens` by default, or `KB_WRITE_TOKENS` locally.
 
 ## Configuration (`kb/config.py`, all from environment)
 
@@ -54,8 +54,10 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 | `KB_BUCKET` | unset | S3 bucket for originals, snapshots and backups; unset means skip S3 (and snapshots) |
 | `KB_SNAPSHOTS` | `on` | `off` stops the database snapshots to `s3://$KB_BUCKET/snapshots/kb-latest.db.gz` even when `KB_BUCKET` is set. Snapshots are also off when `KB_BUCKET` is unset |
 | `KB_SNAPSHOT_INTERVAL` | `5` | Seconds a burst of writes is collected before one snapshot upload (at most one upload per interval while the database is dirty). Must be greater than 0 |
-| `KB_TOKENS_PARAM` | `/kb/write-tokens` | SSM SecureString with `name:secret,name:secret` |
-| `KB_WRITE_TOKENS` | unset | Local override for the token list; when set, SSM is not called |
+| `KB_TOKENS_SOURCE` | `ssm` | Where the write tokens are read from when `KB_WRITE_TOKENS` is unset: `ssm` or `s3`. The app stack sets `s3` (deviation 8) |
+| `KB_TOKENS_PARAM` | `/kb/write-tokens` | SSM SecureString with `name:secret,name:secret` (`KB_TOKENS_SOURCE=ssm`) |
+| `KB_TOKENS_KEY` | `config/write-tokens` | Object in `KB_BUCKET` with `name:secret,name:secret` (`KB_TOKENS_SOURCE=s3`) |
+| `KB_WRITE_TOKENS` | unset | Local override for the token list; when set, AWS is not called |
 | `KB_TOKEN` | unset | Token used by the stdio MCP entry point; must be one of the write tokens |
 | `AWS_REGION` | `us-east-1` | |
 | `KB_CONF_HIGH` / `KB_CONF_LOW` | `0.70` / `0.30` | Semantic confidence cutoffs (tuned in phase 11) |
@@ -77,7 +79,7 @@ Allowed (per the lab list): CloudFormation, CloudFront, CloudWatch, EC2 (`t3.med
 Blocked: **ECR** (`ecr:CreateRepository` is AccessDenied) and **EFS** (`elasticfilesystem:CreateFileSystem` is AccessDenied), both probed from the lab terminal role `runserver`. So the image travels as a tarball through S3 (`infra/push-image.sh`, user data `docker load`) and the database lives on the instance root volume with S3 snapshots instead of a shared file system.
 
 - Region `us-east-1` only.
-- No custom IAM roles or policies (IAM is read only). Use `LabRole` and `LabInstanceProfile` (whether `LabInstanceProfile` exists in this sandbox is not verified yet; S3 access depends on it).
+- No custom IAM roles or policies (IAM is read only). `LabInstanceProfile` does not exist here; the instances use `EMR_EC2_DefaultRole`, which allows S3, CloudWatch metrics and `ec2:DescribeTags` but not SSM or CloudWatch Logs (deviation 8 in `docs/PROGRESS.md`). Do not add anything that needs SSM or CloudWatch Logs on the instance.
 - KMS is list only, so an encrypted root volume may fail with `Client.InternalError`; the fallback is `Encrypted: false`, recorded in `docs/PROGRESS.md`.
 - More than 9 instances suspends the account. The Auto Scaling group is max 1; never launch other instances.
 - Credentials are temporary. If an AWS call fails with `ExpiredToken` or `InvalidClientTokenId`, stop and ask the user to refresh `~/.aws/credentials` from the AWS Academy console (**HUMAN**).

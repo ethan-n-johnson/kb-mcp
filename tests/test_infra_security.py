@@ -104,5 +104,14 @@ def test_user_data_and_templates_hold_no_secret() -> None:
         text = repr(resources)
         assert not re.search(r"AKIA[0-9A-Z]{16}", text), stack
         assert "WriteTokens" not in text and "NoEcho" not in text
-    # The token reaches the app through the instance role from SSM, never through the template.
+    # The token reaches the app through the instance role (from the private bucket, deviation 8),
+    # never through the template: the user data names the source, not the value.
     assert "KB_TOKENS_PARAM" not in rendered
+    assert "-e KB_TOKENS_SOURCE=s3" in rendered and "KB_TOKENS_KEY" not in rendered
+
+
+def test_app_stack_needs_no_ssm_or_cloudwatch_logs_permissions() -> None:
+    """Deviation 8: the sandbox instance role allows S3 and CloudWatch metrics, not SSM or Logs."""
+    rendered = render_user_data(APP)
+    assert "ssm" not in rendered.lower() and "awslogs" not in rendered
+    assert not [n for n, r in APP.items() if r["Type"].startswith(("AWS::Logs::", "AWS::SSM::", "AWS::IAM::"))]

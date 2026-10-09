@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: kb-mcp app stack (NAT gateway, ALB, CloudFront, launch template, Auto Scaling group, logs, alarms). Billed by the hour, safe to delete between sessions.
+Description: kb-mcp app stack (NAT gateway, ALB, CloudFront, launch template, Auto Scaling group, alarms). Billed by the hour, safe to delete between sessions.
 
 Parameters:
   ImageTag:
@@ -11,6 +11,12 @@ Parameters:
     Type: String
     Default: t3.medium
     Description: EC2 instance type for the app server.
+  InstanceProfileName:
+    Type: String
+    Default: EMR_EC2_DefaultRole
+    Description: Existing instance profile for the app instances (the sandbox cannot create IAM roles). It must allow S3 on the data bucket, cloudwatch:PutMetricData and ec2:DescribeTags; SSM and CloudWatch Logs are not needed (deviation 8 in docs/PROGRESS.md). The Cloud Architecting 3 sandbox has EMR_EC2_DefaultRole; Learner Lab has LabInstanceProfile. infra/deploy.sh reads it from KB_INSTANCE_PROFILE.
+    AllowedPattern: '^[A-Za-z0-9+=,.@_-]{1,128}$'
+    ConstraintDescription: An IAM instance profile name.
   AmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
@@ -27,11 +33,11 @@ Parameters:
     ConstraintDescription: A single email address.
   MetricsMode:
     Type: String
-    Default: emf
+    Default: api
     AllowedValues:
       - emf
       - api
-    Description: How the app publishes search metrics (KB_METRICS_MODE). emf logs Embedded Metric Format lines; api sends them with put_metric_data. Switch to api only if the EMF metrics never show up in CloudWatch.
+    Description: How the app publishes search metrics (KB_METRICS_MODE). api sends them with put_metric_data, which the instance role allows. emf writes Embedded Metric Format log lines, which only become metrics when the container logs reach CloudWatch Logs; the sandbox role cannot write there, so emf is only for an environment that adds that back (deviation 8).
   ExtensionOrigin:
     Type: String
     Default: ''
@@ -236,12 +242,8 @@ Resources:
             Compress: true
 
   # --------------------------------------------------------------- Monitoring
-  AppLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: /kb/app
-      RetentionInDays: 14
-
+  # No CloudWatch Logs group: the sandbox instance role cannot write to CloudWatch
+  # Logs, so the container logs stay on the instance (deviation 8).
   AlertTopic:
     Type: AWS::SNS::Topic
     Properties:
@@ -462,9 +464,9 @@ Resources:
         ImageId: !Ref AmiId
         InstanceType: !Ref InstanceType
         IamInstanceProfile:
-          Name: LabInstanceProfile
+          Name: !Ref InstanceProfileName
         # IMDSv2 is required. The hop limit is 2 (not 1) because the container
-        # sits behind the Docker bridge and needs the instance role for SSM and S3
+        # sits behind the Docker bridge and needs the instance role for S3
         # (deviation 1 in docs/PROGRESS.md). The SSRF guard in ingest_url blocks
         # 169.254.169.254 for user-supplied URLs.
         MetadataOptions:
@@ -499,9 +501,9 @@ Resources:
         # Inline user data (deviation 2 in docs/PROGRESS.md). Inside Fn::Sub a
         # literal shell brace expression must be written with an exclamation mark
         # after the dollar and open brace; plain $VAR needs no escaping.
-        # The Sub variables are: Bucket, LogGroupName (map below), ImageTag,
-        # MetricsMode and ExtensionOrigin (parameters), AWS::Region and
-        # AWS::StackName (pseudo parameters).
+        # The Sub variables are: Bucket (map below), ImageTag, MetricsMode and
+        # ExtensionOrigin (parameters), AWS::Region and AWS::StackName (pseudo
+        # parameters).
         UserData:
           Fn::Base64: !Sub
             - |
@@ -513,12 +515,23 @@ Resources:
               # becomes 0 once /healthz answers, so any earlier failure (set -e,
               # explicit exit, a failed restore) signals failure and the stack rolls back
               # without waiting for the 15 minute creation timeout.
+              # On failure the boot log and the container log are copied to
+              # s3://<bucket>/debug/ first: the sandbox role allows neither CloudWatch
+              # Logs nor Session Manager, so S3 is the only way to read them.
+              # Neither log holds a secret (the write tokens never pass through here).
               STATUS=1
               INSTANCE_ID=""
               signal_stack() {
                 local id_args=()
                 if [ -n "$INSTANCE_ID" ]; then
                   id_args=(--id "$INSTANCE_ID")
+                fi
+                if [ "$STATUS" -ne 0 ]; then
+                  local debug
+                  debug="s3://${Bucket}/debug/${!INSTANCE_ID:-unknown}-$(date -u +%Y%m%dT%H%M%SZ)"
+                  docker logs --tail 500 kb > /var/log/kb-container.log 2>&1 || true
+                  aws s3 cp /var/log/kb-bootstrap.log "$debug-bootstrap.log" --region ${AWS::Region} || true
+                  aws s3 cp /var/log/kb-container.log "$debug-container.log" --region ${AWS::Region} || true
                 fi
                 /opt/aws/bin/cfn-signal -e "$STATUS" "${!id_args[@]}" \
                   --stack ${AWS::StackName} --resource AppAsg --region ${AWS::Region} || true
@@ -614,20 +627,25 @@ Resources:
                 -c "file:$CWA_HOME/etc/kb-agent.json" -s \
                 || echo "cloudwatch agent did not start" >&2
 
-              # Container logs go to CloudWatch Logs with Docker's awslogs driver
-              # (deviation 3). awslogs-format=json/emf makes CloudWatch read the
-              # _aws block of the search metric lines (kb/metrics.py) as metrics;
-              # other lines are stored as plain log events.
+              # Container logs stay on the instance with Docker's local driver,
+              # rotated at 5 files of 10 MB (`docker logs kb` reads them). The sandbox
+              # role cannot write to CloudWatch Logs (deviation 8, which replaces the
+              # CloudWatch Logs driver of deviation 3), so search metrics use MetricsMode=api.
               LOG_OPTS=(
-                --log-driver awslogs
-                --log-opt awslogs-region=${AWS::Region}
-                --log-opt awslogs-group=${LogGroupName}
-                --log-opt "awslogs-stream=$INSTANCE_ID"
-                --log-opt awslogs-format=json/emf
+                --log-driver local
+                --log-opt max-size=10m
+                --log-opt max-file=5
               )
 
-              # 5. Run the container. The write tokens are read from SSM by the app
-              # through the instance role, so no secret appears here.
+              # 5. Run the container. The app reads the write tokens itself from
+              # s3://<bucket>/config/write-tokens through the instance role
+              # (KB_TOKENS_SOURCE=s3, kb/config.py), so no secret appears here. Check
+              # the object exists first: without it every write would answer 401.
+              if ! retry 3 10 aws s3api head-object --bucket ${Bucket} \
+                  --key config/write-tokens --region ${AWS::Region} > /dev/null; then
+                echo "s3://${Bucket}/config/write-tokens is missing; see docs/phases/01-network-data-stacks.md step 5" >&2
+                exit 1
+              fi
               # --stop-timeout 30: docker stop sends SIGTERM and waits up to 30 s,
               # long enough for the lifespan shutdown to upload a last snapshot.
               # KB_PROXY_HOPS=2: CloudFront and the ALB each append one entry to
@@ -640,6 +658,7 @@ Resources:
                 -e KB_DB=/data/kb.db \
                 -e KB_BUCKET=${Bucket} \
                 -e AWS_REGION=${AWS::Region} \
+                -e KB_TOKENS_SOURCE=s3 \
                 -e KB_METRICS_MODE=${MetricsMode} \
                 -e "KB_EXTENSION_ORIGIN=${ExtensionOrigin}" \
                 -e KB_PROXY_HOPS=2 \
@@ -670,7 +689,6 @@ Resources:
                 exit 1
               fi
             - Bucket: !ImportValue kb-BucketName
-              LogGroupName: !Ref AppLogGroup
 
   # --------------------------------------------------------- Auto Scaling group
   # Max stays at 1: the vector index lives in process memory and SQLite has a
@@ -729,9 +747,6 @@ Outputs:
   AlertTopicArn:
     Description: SNS topic that receives the alarm emails
     Value: !Ref AlertTopic
-  AppLogGroupName:
-    Description: CloudWatch Logs group for the container logs
-    Value: !Ref AppLogGroup
   AlbDnsName:
     Description: Public DNS name of the load balancer
     Value: !GetAtt Alb.DNSName
