@@ -31,6 +31,7 @@ SCRIPT = INFRA / "scripts" / "restore-on-instance.sh"
 DEPLOY = INFRA / "deploy.sh"
 PUSH = INFRA / "push-image.sh"
 TEARDOWN = INFRA / "teardown-app.sh"
+UP = INFRA / "up.sh"
 
 
 # --- template loading ---------------------------------------------------------------------
@@ -144,13 +145,13 @@ def _shellcheck() -> str | None:
 def test_rendered_user_data_and_scripts_pass_shellcheck(resources: dict[str, Any], tmp_path: Path) -> None:
     script = tmp_path / "user-data.sh"
     script.write_text(render_user_data(resources), encoding="utf-8")
-    cmd = [_shellcheck() or "", "-s", "bash", str(script), str(SCRIPT), str(DEPLOY), str(PUSH), str(TEARDOWN)]
+    cmd = [_shellcheck() or "", "-s", "bash", str(script), str(SCRIPT), str(DEPLOY), str(PUSH), str(TEARDOWN), str(UP)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout
 
 
 def test_shell_scripts_are_executable_and_have_no_trailing_junk() -> None:
-    for path in (SCRIPT, DEPLOY, PUSH, TEARDOWN):
+    for path in (SCRIPT, DEPLOY, PUSH, TEARDOWN, UP):
         assert path.stat().st_mode & stat.S_IXUSR, f"{path.name} is not executable"
         assert path.read_text(encoding="utf-8").startswith("#!/usr/bin/env bash\n")
 
@@ -531,7 +532,7 @@ def code_lines(text: str) -> list[tuple[int, str]]:
 
 
 def test_templates_and_scripts_do_not_use_efs_or_ecr() -> None:
-    for path in (INFRA / "network.yaml", INFRA / "data.yaml", INFRA / "app.yaml", DEPLOY, PUSH, TEARDOWN, SCRIPT):
+    for path in (INFRA / "network.yaml", INFRA / "data.yaml", INFRA / "app.yaml", DEPLOY, PUSH, TEARDOWN, UP, SCRIPT):
         for number, line in code_lines(path.read_text(encoding="utf-8")):
             assert not FORBIDDEN_WORDS.search(line), f"{path.name}:{number}: {line.strip()}"
     rendered = render_user_data(load("app.yaml")["Resources"])
@@ -948,3 +949,211 @@ def test_no_em_or_en_dashes_in_files_from_these_phases() -> None:
     for path in paths:
         text = path.read_text(encoding="utf-8")
         assert em not in text and en not in text, path.name
+
+
+# --- infra/up.sh ----------------------------------------------------------------------------
+
+# A stub aws whose answers come from files in $STATE: stack-<name> holds a stack status,
+# obj-<key with / as _> marks an S3 object that exists, no-profile hides the instance profile.
+AWS_UP_STUB = r"""
+echo "aws $*" >> {log}
+state={state}
+arg() {{ local want=$1; shift; while [ $# -gt 0 ]; do [ "$1" = "$want" ] && {{ echo "$2"; return; }}; shift; done; }}
+case "$1 $2" in
+  "sts get-caller-identity") [ -f "$state/no-creds" ] && exit 255; echo 123456789012 ;;
+  "iam get-instance-profile") [ -f "$state/no-profile" ] && exit 254; echo ok ;;
+  "iam list-instance-profiles") echo "EMR_EC2_DefaultRole myS3Role" ;;
+  "cloudformation describe-stacks")
+    f="$state/stack-$(arg --stack-name "$@")"; [ -f "$f" ] || exit 254; cat "$f" ;;
+  "cloudformation list-exports") [ -f "$state/stack-kb-data" ] && echo kb-bucket || echo None ;;
+  "cloudformation delete-stack") rm -f "$state/stack-$(arg --stack-name "$@")" ;;
+  "s3api head-object") key=$(arg --key "$@"); [ -f "$state/obj-${{key//\//_}}" ] || exit 254 ;;
+  "s3 cp")
+    src=$3; dst=$4
+    case "$dst" in
+      s3://*) key=${{dst#s3://*/}}; cp "$src" "$state/obj-${{key//\//_}}" ;;
+      *) key=${{src#s3://*/}}; cp "$state/obj-${{key//\//_}}" "$dst" ;;
+    esac ;;
+  "ec2 describe-managed-prefix-lists") echo pl-0123456789abcdef0 ;;
+esac
+exit 0
+"""
+
+DEPLOY_UP_STUB = r"""
+echo "deploy.sh $* profile=$KB_INSTANCE_PROFILE pl=${{KB_CLOUDFRONT_PREFIX_LIST_ID:-}} email=${{KB_ALERT_EMAIL:-}}" >> {log}
+echo CREATE_COMPLETE > "{state}/stack-kb-$1"
+"""
+
+PUSH_UP_STUB = r"""
+echo "push-image.sh $*" >> {log}
+tag="$(git rev-parse --short HEAD)"
+[ -n "$(git status --porcelain)" ] && tag="$tag-dirty"
+echo "uploaded" > "{state}/obj-images_kb-mcp-$tag.tar.gz"
+echo "$tag"
+"""
+
+
+@pytest.fixture
+def up_env(tmp_path: Path) -> dict[str, Path]:
+    """A copy of up.sh in a throwaway git repo, with stub aws, deploy.sh and push-image.sh."""
+    root, state, bin_dir, config = (tmp_path / n for n in ("repo", "state", "bin", "config"))
+    for d in (root / "infra", state, bin_dir, config):
+        d.mkdir(parents=True)
+    log = tmp_path / "calls.log"
+    shutil.copy(UP, root / "infra" / "up.sh")
+    make_stub(root / "infra", "deploy.sh", DEPLOY_UP_STUB.format(log=log, state=state))
+    make_stub(root / "infra", "push-image.sh", PUSH_UP_STUB.format(log=log, state=state))
+    make_stub(bin_dir, "aws", AWS_UP_STUB.format(log=log, state=state))
+    (root / ".gitignore").write_text("x\n", encoding="utf-8")
+    git = ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(root)]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "init"], check=True)
+    (config / "up.env").write_text("KB_ALERT_EMAIL=me@example.com\n", encoding="utf-8")
+    return {"root": root, "state": state, "bin": bin_dir, "config": config, "log": log}
+
+
+def run_up(env: dict[str, Path], *args: str) -> subprocess.CompletedProcess[str]:
+    base = {
+        "PATH": f"{env['bin']}:/usr/bin:/bin", "HOME": str(env["root"].parent),
+        "KB_CONFIG_DIR": str(env["config"]),
+    }
+    return subprocess.run(
+        ["bash", str(env["root"] / "infra" / "up.sh"), *args],
+        capture_output=True, text=True, env=base, timeout=60,
+    )
+
+
+def up_calls(env: dict[str, Path]) -> list[str]:
+    return env["log"].read_text(encoding="utf-8").splitlines() if env["log"].exists() else []
+
+
+def test_up_from_an_empty_account_deploys_everything_in_order(up_env: dict[str, Path]) -> None:
+    result = run_up(up_env)
+    assert result.returncode == 0, result.stderr
+    steps = [c.split()[0] + " " + c.split()[1] for c in up_calls(up_env) if not c.startswith("aws ")]
+    assert steps == ["deploy.sh network", "deploy.sh data", "push-image.sh --build", "deploy.sh app"]
+    app = next(c for c in up_calls(up_env) if c.startswith("deploy.sh app"))
+    assert "profile=EMR_EC2_DefaultRole" in app and "pl=pl-0123456789abcdef0" in app
+    assert "email=me@example.com" in app
+    # New tokens were generated into a private file, uploaded, and never printed.
+    tokens = (up_env["config"] / "write-tokens").read_text(encoding="utf-8").strip()
+    assert re.fullmatch(r"temp:[\w-]{43},demo:[\w-]{43}", tokens)
+    assert stat.S_IMODE((up_env["config"] / "write-tokens").stat().st_mode) == 0o600
+    assert (up_env["state"] / "obj-config_write-tokens").read_text(encoding="utf-8").strip() == tokens
+    assert tokens.split(",")[0].split(":")[1] not in result.stdout + result.stderr
+    assert any("s3 cp" in c and "--sse AES256" in c and "config/write-tokens" in c for c in up_calls(up_env))
+    assert "the app starts empty" in result.stderr
+
+
+def test_up_reuses_the_saved_tokens_and_uploads_the_saved_snapshot(up_env: dict[str, Path]) -> None:
+    (up_env["config"] / "write-tokens").write_text("temp:aaa,demo:bbb\n", encoding="utf-8")
+    (up_env["config"] / "kb-latest.db.gz").write_bytes(b"gzipped db")
+    result = run_up(up_env)
+    assert result.returncode == 0, result.stderr
+    assert (up_env["state"] / "obj-config_write-tokens").read_text(encoding="utf-8") == "temp:aaa,demo:bbb\n"
+    assert (up_env["state"] / "obj-snapshots_kb-latest.db.gz").read_bytes() == b"gzipped db"
+    # The snapshot is in place before the app stack (and so the restore at boot) starts.
+    order = up_calls(up_env)
+    snap = next(i for i, c in enumerate(order) if "s3 cp" in c and "snapshots/kb-latest.db.gz" in c)
+    app = next(i for i, c in enumerate(order) if c.startswith("deploy.sh app"))
+    assert snap < app
+
+
+def test_up_never_overwrites_tokens_or_a_snapshot_already_in_the_bucket(up_env: dict[str, Path]) -> None:
+    (up_env["state"] / "obj-config_write-tokens").write_text("live", encoding="utf-8")
+    (up_env["state"] / "obj-snapshots_kb-latest.db.gz").write_text("live db", encoding="utf-8")
+    (up_env["config"] / "kb-latest.db.gz").write_bytes(b"old db")
+    result = run_up(up_env)
+    assert result.returncode == 0, result.stderr
+    assert (up_env["state"] / "obj-config_write-tokens").read_text(encoding="utf-8") == "live"
+    assert (up_env["state"] / "obj-snapshots_kb-latest.db.gz").read_text(encoding="utf-8") == "live db"
+    assert not (up_env["config"] / "write-tokens").exists()  # nothing generated
+    assert not [c for c in up_calls(up_env) if c.startswith("aws s3 cp")]
+
+
+def test_up_skips_the_build_when_the_image_for_the_commit_is_uploaded(up_env: dict[str, Path]) -> None:
+    run_up(up_env)
+    first = len(up_calls(up_env))
+    result = run_up(up_env)
+    assert result.returncode == 0, result.stderr
+    second = up_calls(up_env)[first:]
+    assert not [c for c in second if c.startswith("push-image.sh")]
+    tag = subprocess.run(["git", "-C", str(up_env["root"]), "rev-parse", "--short", "HEAD"],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    assert any(c.startswith(f"deploy.sh app {tag} ") for c in second)
+
+
+def test_up_always_rebuilds_with_uncommitted_changes(up_env: dict[str, Path]) -> None:
+    run_up(up_env)
+    (up_env["root"] / "change.txt").write_text("edit\n", encoding="utf-8")
+    first = len(up_calls(up_env))
+    result = run_up(up_env)
+    assert result.returncode == 0, result.stderr
+    second = up_calls(up_env)[first:]
+    assert "push-image.sh --build" in second
+    assert any(re.match(r"deploy\.sh app [0-9a-f]+-dirty ", c) for c in second)
+
+
+def test_up_deletes_an_app_stack_left_in_rollback_complete(up_env: dict[str, Path]) -> None:
+    (up_env["state"] / "stack-kb-app").write_text("ROLLBACK_COMPLETE\n", encoding="utf-8")
+    result = run_up(up_env)
+    assert result.returncode == 0, result.stderr
+    order = up_calls(up_env)
+    delete = next(i for i, c in enumerate(order) if "delete-stack" in c and "kb-app" in c)
+    assert "stack-delete-complete" in order[delete + 1]
+    assert delete < next(i for i, c in enumerate(order) if c.startswith("deploy.sh app"))
+
+
+def test_up_stops_while_a_stack_is_still_changing(up_env: dict[str, Path]) -> None:
+    (up_env["state"] / "stack-kb-network").write_text("UPDATE_IN_PROGRESS\n", encoding="utf-8")
+    result = run_up(up_env)
+    assert result.returncode == 1 and "kb-network is UPDATE_IN_PROGRESS" in result.stderr
+    assert not [c for c in up_calls(up_env) if c.startswith("deploy.sh")]
+
+
+def test_up_needs_the_alert_email(up_env: dict[str, Path]) -> None:
+    (up_env["config"] / "up.env").unlink()
+    result = run_up(up_env)
+    assert result.returncode == 2 and "KB_ALERT_EMAIL" in result.stderr and "up.env" in result.stderr
+    assert up_calls(up_env) == []
+
+
+def test_up_explains_expired_credentials(up_env: dict[str, Path]) -> None:
+    (up_env["state"] / "no-creds").touch()
+    result = run_up(up_env)
+    assert result.returncode == 1 and "Start Lab" in result.stderr
+    assert not [c for c in up_calls(up_env) if c.startswith("deploy.sh")]
+
+
+def test_up_lists_the_profiles_when_the_instance_profile_is_missing(up_env: dict[str, Path]) -> None:
+    (up_env["state"] / "no-profile").touch()
+    (up_env["config"] / "up.env").write_text(
+        "KB_ALERT_EMAIL=me@example.com\nKB_INSTANCE_PROFILE=LabInstanceProfile\n", encoding="utf-8"
+    )
+    result = run_up(up_env)
+    assert result.returncode == 1
+    assert "LabInstanceProfile not found" in result.stderr and "EMR_EC2_DefaultRole myS3Role" in result.stderr
+    assert not [c for c in up_calls(up_env) if c.startswith("deploy.sh")]
+
+
+def test_up_save_downloads_the_snapshot(up_env: dict[str, Path]) -> None:
+    (up_env["state"] / "stack-kb-data").write_text("CREATE_COMPLETE\n", encoding="utf-8")
+    (up_env["state"] / "obj-snapshots_kb-latest.db.gz").write_bytes(b"latest db")
+    result = run_up(up_env, "save")
+    assert result.returncode == 0, result.stderr
+    assert (up_env["config"] / "kb-latest.db.gz").read_bytes() == b"latest db"
+    assert not [c for c in up_calls(up_env) if c.startswith(("deploy.sh", "push-image.sh"))]
+
+
+def test_up_save_fails_clearly_without_a_snapshot(up_env: dict[str, Path]) -> None:
+    (up_env["state"] / "stack-kb-data").write_text("CREATE_COMPLETE\n", encoding="utf-8")
+    result = run_up(up_env, "save")
+    assert result.returncode == 1 and "nothing to save" in result.stderr
+    assert not (up_env["config"] / "kb-latest.db.gz").exists()
+
+
+def test_up_rejects_unknown_arguments(up_env: dict[str, Path]) -> None:
+    assert run_up(up_env, "deploy").returncode == 2
+    assert run_up(up_env, "save", "extra").returncode == 2
+

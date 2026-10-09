@@ -213,16 +213,31 @@ The sandbox gives you temporary credentials that stop working when the lab sessi
    aws sts get-caller-identity
    ```
 
-   It should print the sandbox account ID.
-5. Start Claude Code in `kb-mcp` and continue with the next phase (`docs/phases/README.md` has the prompt).
+   It should print the sandbox account ID. **Compare it with the last session.** When a session times out, the sandbox can come back as a brand new, empty AWS account (seen on 2026-10-09: `849928937619` in the morning, `983926826929` in the afternoon). Everything from the old account is gone then: the stacks, the bucket with the image, the write tokens and the database snapshots.
+5. Bring the app up with one command (it skips whatever already exists, so it is safe to run every session):
 
-When any AWS command later fails with `ExpiredToken` or `InvalidClientTokenId`, the session ran out: click Start Lab again and repeat steps 2 to 4.
+   ```bash
+   source .venv/bin/activate
+   infra/up.sh
+   ```
+
+   The first time, create `~/.config/kb-mcp/up.env` with one line, `KB_ALERT_EMAIL=you@example.com` (that folder is outside the repo). `up.sh` deploys `kb-network` and `kb-data`, uploads the write tokens (from `~/.config/kb-mcp/write-tokens`, generated there on the first run; open that file to copy them), uploads your saved database snapshot if the bucket has none, builds and uploads the image unless the bucket already has it for the current commit, looks up the CloudFront prefix list and deploys `kb-app`. On an empty account this takes about 20 to 30 minutes (image upload, NAT gateway, CloudFront). Confirm the SNS email again after a new account.
+6. **Before the session ends**, save the knowledge base so the next account can restore it:
+
+   ```bash
+   infra/up.sh save
+   ```
+
+   It downloads `snapshots/kb-latest.db.gz` to `~/.config/kb-mcp/kb-latest.db.gz`. Without it, a new account starts with an empty knowledge base.
+7. Start Claude Code in `kb-mcp` and continue with the next phase (`docs/phases/README.md` has the prompt).
+
+When any AWS command later fails with `ExpiredToken` or `InvalidClientTokenId`, the session ran out: click Start Lab again and repeat steps 2 to 5.
 
 ---
 
 ## Deploy flow (what the phases run)
 
-The phases do these for you; this is the overview. Run from `kb-mcp` in a bash shell (Linux, or the Ubuntu terminal on Windows). Run the commands **one at a time** and check each one finished without an error before the next; pasting the whole block keeps going after a failure.
+`infra/up.sh` (above) runs all of this in order and skips what exists. The steps below are what it does, for running one piece by hand. Run from `kb-mcp` in a bash shell (Linux, or the Ubuntu terminal on Windows). Run the commands **one at a time** and check each one finished without an error before the next; pasting the whole block keeps going after a failure.
 
 ```bash
 infra/deploy.sh network          # VPC, subnets, S3 gateway endpoint (phase 01)
@@ -288,6 +303,7 @@ To save sandbox credit between sessions, delete only the app stack with `infra/t
 | `Invalid IAM Instance Profile name` when deploying the app stack | The profile does not exist in this sandbox. The default is `EMR_EC2_DefaultRole`; check with `aws iam list-instance-profiles --query 'InstanceProfiles[].InstanceProfileName'` and set `KB_INSTANCE_PROFILE` |
 | `config/write-tokens is missing` in the debug boot log | Step 5 of phase 01 was not run (or wrote to SSM only): run it, then redeploy |
 | AWS CLI output opens in a pager and stops at `:` | Press `q`; turn the pager off once with `aws configure set cli_pager ""` |
+| `account ID` changed and `describe-stacks` shows none of the `kb-` stacks | The sandbox reset to a new account: run `infra/up.sh` (it rebuilds everything; the knowledge base comes back only from a snapshot saved with `infra/up.sh save`) |
 | `syntax error near unexpected token 'newline'` | A placeholder like `<tag>` was typed literally: use the real tag, or `"$TAG"` |
 | `$'\r': command not found` running a script | Windows line endings: `git config --global core.autocrlf input`, then re-clone inside WSL |
 
