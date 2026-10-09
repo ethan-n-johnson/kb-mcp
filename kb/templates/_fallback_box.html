@@ -1,0 +1,7 @@
+<div id="fallback-box" class="fallback-box">
+  <p>Search is currently in <strong>{{ "keyword (forced)" if fallback else "automatic" }}</strong> mode.</p>
+  <button type="button" hx-post="/ui/admin/fallback" hx-target="#fallback-box" hx-swap="outerHTML" data-error-target="#flash" hx-vals='{{ {"on": "false" if fallback else "true"}|tojson }}'>
+    {{ "Turn keyword fallback off" if fallback else "Force keyword fallback" }}
+  </button>
+</div>
+{% if oob %}{% include "_mode_badge.html" %}{% endif %}

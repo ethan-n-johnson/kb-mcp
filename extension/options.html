@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KB Capture settings</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="options">
+  <main>
+    <h1>KB Capture settings</h1>
+    <form id="form">
+      <label for="url">Server URL</label>
+      <input id="url" type="url" required autocomplete="off"
+             placeholder="https://d1234abcd.cloudfront.net">
+      <p class="hint">
+        Your CloudFront URL, or <code>http://localhost:8000</code> for a local server.
+        Saving asks Chrome for access to this one address only.
+      </p>
+      <label for="token">Write token</label>
+      <input id="token" type="password" required autocomplete="off" spellcheck="false">
+      <p class="hint">Stored in this browser profile only (<code>chrome.storage.local</code>).</p>
+      <div class="row">
+        <button id="save" type="submit">Save</button>
+        <button id="test" type="button">Test</button>
+      </div>
+    </form>
+    <div id="status" role="status" aria-live="polite"></div>
+  </main>
+  <script src="common.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

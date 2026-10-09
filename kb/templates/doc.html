@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}{{ doc.title }} | Knowledge base{% endblock %}
+{% block content %}
+<article class="doc">
+  <h1>{{ doc.title }}</h1>
+  <dl class="doc-meta">
+    <div><dt>Tags</dt><dd>{% for tag in doc.tags %}<span class="badge badge-tag">{{ tag }}</span> {% else %}none{% endfor %}</dd></div>
+    <div><dt>Source</dt><dd>{% if doc.source_url|safe_url %}<a href="{{ doc.source_url|safe_url }}" rel="noopener noreferrer">{{ doc.source_url }}</a>{% else %}{{ doc.source_type }} (no URL){% endif %}</dd></div>
+    <div><dt>Created</dt><dd>{{ doc.created_at|short_date }}</dd></div>
+    <div><dt>Updated</dt><dd>{{ doc.updated_at|short_date }}</dd></div>
+    <div><dt>Verified</dt><dd>{% with doc_id=doc.id, verified_at=doc.verified_at, verified_by=doc.verified_by %}{% include "_verify_box.html" %}{% endwith %}</dd></div>
+  </dl>
+  <div class="markdown">{{ doc.content_md|markdown }}</div>
+</article>
+{% endblock %}

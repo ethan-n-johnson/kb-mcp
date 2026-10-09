@@ -1,0 +1,88 @@
+:root {
+  --bg: #ffffff;
+  --fg: #1c2330;
+  --muted: #5b6676;
+  --border: #c9d1dc;
+  --accent: #1f6f8b;
+  --accent-fg: #ffffff;
+  --ok-bg: #e3f4ea;
+  --warn-bg: #fff3d6;
+  --error-bg: #fde4e1;
+  --note-bg: #eef1f5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161b22;
+    --fg: #e6e9ef;
+    --muted: #9aa5b5;
+    --border: #3a4350;
+    --accent: #4fa6c4;
+    --accent-fg: #0d1117;
+    --ok-bg: #173826;
+    --warn-bg: #3d3216;
+    --error-bg: #46211e;
+    --note-bg: #232a34;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+body.popup { width: 340px; }
+body.options { max-width: 520px; }
+
+main { padding: 14px 16px; }
+
+h1 { margin: 0 0 10px; font-size: 16px; }
+
+label { display: block; margin: 10px 0 4px; font-weight: 600; }
+label.check { display: flex; align-items: center; gap: 6px; font-weight: 400; }
+label[hidden], form[hidden], p[hidden] { display: none; }
+
+input[type="text"], input[type="url"], input[type="password"] {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+button {
+  padding: 6px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled { opacity: 0.55; cursor: default; }
+button[type="button"] { background: transparent; color: var(--accent); }
+
+form > button { margin-top: 12px; width: 100%; }
+.row { display: flex; gap: 8px; margin-top: 12px; }
+.hint { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+a { color: var(--accent); }
+footer { margin-top: 10px; font-size: 12px; text-align: right; }
+
+#result:empty, #status:empty { display: none; }
+#result, #status { margin-top: 12px; padding: 8px 10px; border-radius: 4px; background: var(--note-bg); }
+.ok { background: var(--ok-bg) !important; }
+.warn { background: var(--warn-bg) !important; }
+.error { background: var(--error-bg) !important; }
+.note { background: var(--note-bg); }
+
+.candidates { margin: 8px 0; padding-left: 18px; }
+.candidates li { margin-bottom: 6px; }
+.candidates button { margin-left: 4px; padding: 2px 8px; font-size: 12px; }
+#result > button { margin-top: 4px; }

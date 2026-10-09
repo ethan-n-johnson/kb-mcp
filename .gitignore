@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.db
+*.db-journal
+.localdata/
+.env
+models/
+.pytest_cache/
+dist/
+*.zip
+*.egg-info/
+.claude/

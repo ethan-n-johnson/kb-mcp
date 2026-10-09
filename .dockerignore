@@ -1,0 +1,17 @@
+.venv
+.git
+.claude
+.localdata
+.env
+.pytest_cache
+models
+tests
+**/__pycache__
+**/*.pyc
+**/*.db
+**/*.db-journal
+*.egg-info
+dist
+extension
+docs
+infra

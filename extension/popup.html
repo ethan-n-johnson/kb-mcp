@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KB Capture</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="popup">
+  <main>
+    <h1>KB Capture</h1>
+    <p id="setup" class="note" hidden>
+      Set the server URL and write token first.
+      <a href="#" id="setup-link">Open settings</a>
+    </p>
+    <form id="form" hidden>
+      <label for="title">Title</label>
+      <input id="title" type="text" maxlength="500" autocomplete="off">
+      <label for="tags">Tags (comma separated)</label>
+      <input id="tags" type="text" autocomplete="off" placeholder="aws, networking">
+      <label id="sel-row" class="check" hidden>
+        <input id="sel" type="checkbox"> Selection only
+      </label>
+      <button id="capture" type="submit">Capture</button>
+    </form>
+    <div id="result" role="status" aria-live="polite"></div>
+    <footer><a href="#" id="options-link">Settings</a></footer>
+  </main>
+  <script src="common.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

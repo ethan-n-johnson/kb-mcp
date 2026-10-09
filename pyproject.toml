@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kb"
+version = "0.1.0"
+description = "Knowledge-base MCP server for the Cloud Computing course"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "mcp>=2,<3",
+  "fastembed",
+  "numpy",
+  "trafilatura>=2.0",
+  "pymupdf4llm",
+  "httpx",
+  "jinja2",
+  "nh3",
+  "slowapi",
+  "boto3",
+  "pyyaml",
+  "markdown-it-py",
+  "python-multipart",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "moto[s3,ssm]",
+  "cfn-lint",
+]
+
+[tool.setuptools.packages.find]
+include = ["kb*"]
+
+[tool.setuptools.package-data]
+kb = ["templates/*", "static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not models'"
+markers = [
+  "models: loads real ONNX models (slow, needs the model cache)",
+]

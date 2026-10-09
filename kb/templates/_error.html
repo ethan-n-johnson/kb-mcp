@@ -1,0 +1,4 @@
+<div class="notice notice-error" role="alert">
+  <strong>{{ code }}</strong>: {{ message }}
+  {% if code == "unauthorized" %}<br>Enter a write token in the header, then try again.{% endif %}
+</div>

@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: kb-mcp data stack (S3 bucket for originals, images, database snapshots and backups). State lives here, so the bucket is retained.
+
+Resources:
+  # No explicit bucket name: avoids collisions after a Retain delete.
+  Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-noncurrent-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+          # Nightly database backups (kb/backup.py). The bucket is versioned, so
+          # day 30 turns the backup into a delete marker, and the rule above
+          # removes the old version 30 days after that.
+          - Id: expire-backups
+            Status: Enabled
+            Prefix: backups/
+            ExpirationInDays: 30
+          # Container images (infra/push-image.sh, delivered to the instance
+          # from here because the sandbox has no ECR). Same mechanics as backups.
+          # A stack recreated after 30 days needs a fresh push of its image tag.
+          - Id: expire-images
+            Status: Enabled
+            Prefix: images/
+            ExpirationInDays: 30
+          # snapshots/kb-latest.db.gz is overwritten after every write burst. The
+          # bucket is versioned, so each overwrite keeps the old version, and the
+          # first rule above removes it 30 days later. The current version never
+          # expires. A push that dies halfway leaves no visible object, only parts.
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 2
+      Tags:
+        - Key: Project
+          Value: kb-mcp
+
+Outputs:
+  BucketName:
+    Description: S3 bucket for originals, images, database snapshots and backups
+    Value: !Ref Bucket
+    Export:
+      Name: kb-BucketName

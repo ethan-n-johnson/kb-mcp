@@ -1,0 +1,29 @@
+{% if result is none %}
+  <p class="hint">Search the knowledge base by question or keywords.</p>
+{% else %}
+  <div class="result-head">
+    <span class="badge badge-conf-{{ result.confidence }}">confidence: {{ result.confidence }}</span>
+    <span class="badge badge-mode-{{ result.mode }}">mode: {{ result.mode }}</span>
+  </div>
+  {% if result.confidence == "low" %}
+    <p class="notice notice-warn">No good answer in the knowledge base.{% if result.results %} The closest matches are listed below.{% endif %}</p>
+  {% endif %}
+  {% if not result.results %}
+    <p class="hint">Nothing matched.</p>
+  {% else %}
+    <ol class="hits">
+      {% for hit in result.results %}
+        <li class="hit">
+          <h2><a href="/docs/{{ hit.doc_id }}">{{ hit.title }}</a></h2>
+          {% if hit.heading_path %}<p class="path">{{ hit.heading_path }}</p>{% endif %}
+          <p class="snippet">{{ hit.snippet|snippet }}</p>
+          <p class="meta">
+            <span>score {{ "%.2f"|format(hit.score) }}</span>
+            {% if hit.source_url|safe_url %}<a href="{{ hit.source_url|safe_url }}" rel="noopener noreferrer">source</a>{% endif %}
+            {% if hit.verified_at %}<span>verified {{ hit.verified_at|short_date }}</span>{% endif %}
+          </p>
+        </li>
+      {% endfor %}
+    </ol>
+  {% endif %}
+{% endif %}

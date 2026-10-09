@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% set active = 'add' %}
+{% block title %}Add | Knowledge base{% endblock %}
+{% block content %}
+<h1>Add to the knowledge base</h1>
+<p class="hint">Adding needs a write token. Enter it in the header first.</p>
+
+<section class="card">
+  <h2>Paste Markdown</h2>
+  <form id="paste-form" hx-post="/ui/add/paste" hx-target="#paste-result" hx-disabled-elt="find button[type=submit]" hx-indicator="#paste-busy">
+    <label for="paste-title">Title (optional, taken from the text if empty)</label>
+    <input id="paste-title" name="title" type="text" maxlength="500">
+    <label for="paste-tags">Tags (comma separated)</label>
+    <input id="paste-tags" name="tags" type="text">
+    <label for="paste-content">Markdown</label>
+    <textarea id="paste-content" name="content" rows="10" required></textarea>
+    <p><button type="submit">Add</button> <span id="paste-busy" class="htmx-indicator">Working...</span></p>
+  </form>
+  <div id="paste-result" aria-live="polite"></div>
+</section>
+
+<section class="card">
+  <h2>Upload a file</h2>
+  <form id="file-form" hx-post="/ui/add/file" hx-encoding="multipart/form-data" hx-target="#file-result" hx-disabled-elt="find button[type=submit]" hx-indicator="#file-busy">
+    <label for="file-input">Markdown, HTML or PDF file (up to 20 MB)</label>
+    <input id="file-input" name="file" type="file" accept=".md,.markdown,.txt,.html,.htm,.pdf" required>
+    <label for="file-title">Title (optional)</label>
+    <input id="file-title" name="title" type="text" maxlength="500">
+    <label for="file-tags">Tags (comma separated)</label>
+    <input id="file-tags" name="tags" type="text">
+    <p><button type="submit">Upload</button> <span id="file-busy" class="htmx-indicator">Working...</span></p>
+  </form>
+  <div id="file-result" aria-live="polite"></div>
+</section>
+
+<section class="card">
+  <h2>From a URL</h2>
+  <form id="url-form" hx-post="/ui/add/url" hx-target="#url-result" hx-disabled-elt="find button[type=submit]" hx-indicator="#url-busy">
+    <label for="url-input">Page address</label>
+    <input id="url-input" name="url" type="url" placeholder="https://docs.aws.amazon.com/..." required>
+    <label for="url-tags">Tags (comma separated)</label>
+    <input id="url-tags" name="tags" type="text">
+    <p><button type="submit">Fetch and add</button> <span id="url-busy" class="htmx-indicator">Working...</span></p>
+  </form>
+  <div id="url-result" aria-live="polite"></div>
+</section>
+{% endblock %}

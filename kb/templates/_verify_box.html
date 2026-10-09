@@ -1,0 +1,8 @@
+<div id="verify-box" class="verify-box">
+  {% if verified_at %}
+    <span>Verified {{ verified_at|short_date }}{% if verified_by %} by {{ verified_by }}{% endif %}</span>
+  {% else %}
+    <span>Not verified yet</span>
+  {% endif %}
+  <button type="button" hx-post="/ui/docs/{{ doc_id }}/verify" hx-target="#verify-box" hx-swap="outerHTML" data-error-target="#flash">Verify</button>
+</div>

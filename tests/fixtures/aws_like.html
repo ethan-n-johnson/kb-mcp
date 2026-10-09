@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Attach an Amazon EBS volume - Amazon EC2 User Guide</title>
+  <meta name="description" content="How to attach an EBS volume to an instance.">
+  <link rel="canonical" href="https://docs.example.com/ec2/latest/ug/ebs-attaching-volume.html">
+</head>
+<body>
+  <div id="cookie-banner" class="cookie-banner">
+    <p>We use cookies to improve your experience. Accept all cookies or manage your preferences.</p>
+    <button>Accept all cookies</button>
+  </div>
+  <header>
+    <nav id="top-nav" aria-label="Primary">
+      <ul>
+        <li><a href="/products">Products</a></li>
+        <li><a href="/pricing">Pricing</a></li>
+        <li><a href="/signin">Sign in to the console</a></li>
+      </ul>
+    </nav>
+  </header>
+  <div class="layout">
+    <aside id="sidebar" class="toc-sidebar" role="navigation">
+      <ul>
+        <li><a href="/ec2/overview">Sidebar link: instance overview</a></li>
+        <li><a href="/ec2/storage">Sidebar link: storage options</a></li>
+        <li><a href="/ec2/network">Sidebar link: networking</a></li>
+      </ul>
+    </aside>
+    <main id="main-content">
+      <article>
+        <h1>Attach an Amazon EBS volume to an instance</h1>
+        <p>You can attach an available Amazon EBS volume to one or more of your instances that are in the same Availability Zone as the volume. The volume must be in the available state before you can attach it, and the instance must be running or stopped.</p>
+        <p>Multi-Attach lets a single Provisioned IOPS SSD volume attach to several Nitro-based instances in the same Availability Zone at the same time, which is useful for clustered applications.</p>
+        <h2>Attach a volume using the console</h2>
+        <p>Open the Amazon EC2 console, choose Volumes in the navigation pane, and select the volume to attach. Choose Actions, then Attach volume. For Instance, enter the ID of the instance or select it from the list, and for Device name enter a supported device name. After you choose Attach volume, connect to your instance and mount the volume so that the operating system can use it.</p>
+        <p>The device name you specify is used by Amazon EC2, but the block device driver of the operating system may assign a different name when it mounts the volume, so check the mapping before you write data.</p>
+        <h2>Volume types and limits</h2>
+        <p>The following table summarizes the common volume types and the limits that apply when you attach them to an instance.</p>
+        <table>
+          <thead>
+            <tr><th>Volume type</th><th>Maximum IOPS</th><th>Maximum size</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>gp3</td><td>16000</td><td>16 TiB</td></tr>
+            <tr><td>io2</td><td>64000</td><td>64 TiB</td></tr>
+            <tr><td>st1</td><td>500</td><td>16 TiB</td></tr>
+          </tbody>
+        </table>
+        <p>Choose the volume type that matches your throughput and latency needs, and remember that you can modify the type of a volume after it is attached without detaching it.</p>
+      </article>
+    </main>
+  </div>
+  <footer id="footer">
+    <p>Footer: Privacy | Site terms | Cookie preferences | 2026 Example Web Services, Inc.</p>
+    <p><a href="/legal">Legal notices and disclaimers</a></p>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,51 @@
+{#- Result of an add. `kind` is created, duplicate, possible_duplicate, updated or merged;
+    `source` (paste, file or url) names the form whose fields the buttons send again. -#}
+{% macro resend(label, action, candidate=none, primary=false) -%}
+  <button type="button"{% if primary %} class="primary"{% endif %}
+    hx-post="/ui/add/{{ source }}" hx-include="#{{ source }}-form" hx-target="#{{ source }}-result"
+    {%- if source == "file" %} hx-encoding="multipart/form-data"{% endif %}
+    hx-vals='{{ ({"action": action} if candidate is none else {"action": action, "candidate": candidate})|tojson }}'>{{ label }}</button>
+{%- endmacro %}
+
+{% if kind == "created" %}
+  <div class="notice notice-ok" role="status">
+    Saved as <a href="/docs/{{ result.doc_id }}">document {{ result.doc_id }}</a> ({{ result.chunks }} chunk{{ "" if result.chunks == 1 else "s" }}).
+    {% if result.near_duplicate_check %}<br>Near-duplicate check {{ result.near_duplicate_check }}.{% endif %}
+  </div>
+{% elif kind == "duplicate" %}
+  <div class="notice notice-warn" role="status">
+    This exact content is already stored as <a href="/docs/{{ result.doc_id }}">document {{ result.doc_id }}</a>. Nothing was added.
+  </div>
+{% elif kind == "possible_duplicate" %}
+  <div class="notice notice-warn" role="status">
+    <p>This looks like something already in the knowledge base. Nothing was saved yet.</p>
+    <ul class="candidates">
+      {% for c in result.candidates %}
+        <li>
+          <a href="/docs/{{ c.doc_id }}">{{ c.title }}</a>
+          <span class="meta">similarity {{ "%.2f"|format(c.similarity) }}</span>
+          <span class="actions">
+            {{ resend("Update existing", "update", c.doc_id, true) }}
+            {{ resend("Merge", "merge", c.doc_id) }}
+          </span>
+        </li>
+      {% endfor %}
+    </ul>
+    <p>
+      {{ resend("Save anyway", "force") }}
+      <span class="hint">Update replaces the old text with the new text. Merge adds the new text to the old document as a section. Save anyway keeps both.</span>
+    </p>
+  </div>
+{% elif kind == "updated" %}
+  <div class="notice notice-ok" role="status">
+    {% if result.status == "unchanged" %}
+      No change: <a href="/docs/{{ result.doc_id }}">document {{ result.doc_id }}</a> already has this content.
+    {% else %}
+      Updated <a href="/docs/{{ result.doc_id }}">document {{ result.doc_id }}</a> ({{ result.chunks }} chunk{{ "" if result.chunks == 1 else "s" }}).
+    {% endif %}
+  </div>
+{% elif kind == "merged" %}
+  <div class="notice notice-ok" role="status">
+    Merged into <a href="/docs/{{ result.doc_id }}">document {{ result.doc_id }}</a> ({{ result.chunks }} chunk{{ "" if result.chunks == 1 else "s" }}).
+  </div>
+{% endif %}

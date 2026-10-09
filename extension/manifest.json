@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "KB Capture",
+  "version": "0.1.0",
+  "description": "Send the current page, or just your selection, to your knowledge-base server.",
+  "minimum_chrome_version": "105",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "optional_host_permissions": [
+    "https://*.cloudfront.net/*",
+    "http://localhost:8000/*"
+  ],
+  "action": {
+    "default_title": "Capture to KB",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_page": "options.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

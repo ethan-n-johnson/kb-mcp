@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="htmx-config" content='{"allowEval": false, "allowScriptTags": false, "includeIndicatorStyles": false, "selfRequestsOnly": true}'>
+  <title>{% block title %}Knowledge base{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx-2.0.4.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/">Knowledge base</a>
+    <nav aria-label="Main">
+      <a href="/"{% if active == 'search' %} aria-current="page"{% endif %}>Search</a>
+      <a href="/add"{% if active == 'add' %} aria-current="page"{% endif %}>Add</a>
+      <a href="/maintenance"{% if active == 'maintenance' %} aria-current="page"{% endif %}>Maintenance</a>
+    </nav>
+    <div class="header-status">
+      {% include "_mode_badge.html" %}
+      <form id="token-form" class="token-form" autocomplete="off">
+        <label class="visually-hidden" for="token-input">Write token</label>
+        <input id="token-input" type="password" placeholder="Write token" autocomplete="off">
+        <button type="submit">Save</button>
+        <button type="button" id="token-clear" hidden>Clear</button>
+        <span id="token-status" class="token-status" role="status">read only</span>
+      </form>
+    </div>
+  </header>
+  <main>
+    <div id="flash" aria-live="polite"></div>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

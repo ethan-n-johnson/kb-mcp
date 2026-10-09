@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% set active = 'maintenance' %}
+{% block title %}Maintenance | Knowledge base{% endblock %}
+{% block content %}
+<h1>Maintenance</h1>
+
+<section class="card">
+  <h2>Search mode</h2>
+  {% include "_fallback_box.html" %}
+</section>
+
+<section class="card">
+  <h2>Stale documents</h2>
+  <form class="inline-form" action="/maintenance" method="get">
+    <label for="days">Not verified or updated for at least</label>
+    <input id="days" name="days" type="number" min="0" max="3650" value="{{ days }}">
+    <span>days</span>
+    <button type="submit">Show</button>
+  </form>
+  {% if stale %}
+    <table>
+      <thead><tr><th>Document</th><th>Last touched</th><th>Days</th><th>Verify</th></tr></thead>
+      <tbody>
+        {% for d in stale %}
+          <tr>
+            <td><a href="/docs/{{ d.doc_id }}">{{ d.title }}</a></td>
+            <td>{{ (d.verified_at or d.updated_at)|short_date }}</td>
+            <td>{{ d.days_since }}</td>
+            <td>
+              <button type="button" hx-post="/ui/docs/{{ d.doc_id }}/verify" hx-target="closest td" hx-swap="innerHTML" hx-vals='{"view": "cell"}' data-error-target="#flash">Verify</button>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="hint">Nothing is stale.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Top gaps</h2>
+  <p class="hint">Questions the knowledge base could not answer well, most asked first.</p>
+  {% if gaps %}
+    <table>
+      <thead><tr><th>Question</th><th>Asked</th><th>Last asked</th><th>Best score</th></tr></thead>
+      <tbody>
+        {% for g in gaps %}
+          <tr>
+            <td>{{ g.query }}</td>
+            <td>{{ g.count }}</td>
+            <td>{{ g.last_seen|short_date }}</td>
+            <td>{% if g.top_score is not none %}{{ "%.2f"|format(g.top_score) }}{% endif %}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="hint">No open gaps.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Recent activity</h2>
+  {% if audit %}
+    <table>
+      <thead><tr><th>When</th><th>Token</th><th>Action</th><th>Document</th><th>Note</th></tr></thead>
+      <tbody>
+        {% for e in audit %}
+          <tr>
+            <td>{{ e.at }}</td>
+            <td>{{ e.token_name or "" }}</td>
+            <td>{{ e.action }}</td>
+            <td>{% if e.doc_id %}<a href="/docs/{{ e.doc_id }}">{{ e.doc_id }}</a>{% endif %}</td>
+            <td>{{ e.note or "" }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="hint">No activity yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

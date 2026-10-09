@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% set active = 'search' %}
+{% block title %}Search | Knowledge base{% endblock %}
+{% block content %}
+<h1>Search</h1>
+<form class="search-form" action="/" method="get" hx-get="/ui/search" hx-trigger="submit" hx-target="#results" hx-indicator="#search-busy">
+  <label class="visually-hidden" for="q">Question</label>
+  <input id="q" name="q" type="search" value="{{ q }}" placeholder="Ask a question or enter keywords" autofocus>
+  <button type="submit">Search</button>
+  <span id="search-busy" class="htmx-indicator">Searching...</span>
+</form>
+<section id="results" aria-live="polite">
+  {% include "_results.html" %}
+</section>
+{% endblock %}

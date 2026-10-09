@@ -1,0 +1,749 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: kb-mcp app stack (NAT gateway, ALB, CloudFront, launch template, Auto Scaling group, logs, alarms). Billed by the hour, safe to delete between sessions.
+
+Parameters:
+  ImageTag:
+    Type: String
+    Description: Tag of the kb-mcp image tarball in S3 (s3://<bucket>/images/kb-mcp-<tag>.tar.gz, uploaded by infra/push-image.sh, which prints the tag). Changing it replaces the instance (rolling update). Images expire after 30 days.
+    AllowedPattern: '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
+    ConstraintDescription: A valid Docker tag (letters, digits, underscore, dot, dash; max 128 characters).
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    Description: EC2 instance type for the app server.
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 AMI, resolved from the public SSM parameter when the stack is created or updated.
+  CloudFrontPrefixListId:
+    Type: String
+    Description: ID of the CloudFront origin-facing managed prefix list (com.amazonaws.global.cloudfront.origin-facing), recorded in phase 00. The ALB accepts port 80 only from it. infra/deploy.sh reads it from KB_CLOUDFRONT_PREFIX_LIST_ID.
+    AllowedPattern: '^pl-[0-9a-f]{8,17}$'
+    ConstraintDescription: A managed prefix list ID such as pl-3b927c52.
+  AlertEmail:
+    Type: String
+    Description: Address that receives the CloudWatch alarm emails (confirm the SNS subscription from the inbox). infra/deploy.sh reads it from KB_ALERT_EMAIL.
+    AllowedPattern: '^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$'
+    ConstraintDescription: A single email address.
+  MetricsMode:
+    Type: String
+    Default: emf
+    AllowedValues:
+      - emf
+      - api
+    Description: How the app publishes search metrics (KB_METRICS_MODE). emf logs Embedded Metric Format lines; api sends them with put_metric_data. Switch to api only if the EMF metrics never show up in CloudWatch.
+  ExtensionOrigin:
+    Type: String
+    Default: ''
+    AllowedPattern: '^(chrome-extension://[a-p]{32})?$'
+    ConstraintDescription: Empty (no CORS headers at all) or chrome-extension:// followed by the 32 letter extension ID.
+    Description: Origin of the Chrome capture extension (KB_EXTENSION_ORIGIN), the only origin CORS allows on the API. Leave empty to send no CORS headers. infra/deploy.sh reads it from KB_EXTENSION_ORIGIN. The pattern keeps the value safe to place in the user data shell script.
+
+Resources:
+  # ---------------------------------------------------------------- Networking
+  # The NAT gateway lives here (not in kb-network) so deleting kb-app removes
+  # the hourly charge. The route below is added to the imported private route table.
+  NatEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: kb-nat-eip
+        - Key: Project
+          Value: kb-mcp
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      SubnetId: !ImportValue kb-PublicSubnetA
+      Tags:
+        - Key: Name
+          Value: kb-nat
+        - Key: Project
+          Value: kb-mcp
+
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !ImportValue kb-PrivateRouteTableId
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  # ---------------------------------------------------------- Security groups
+  # The ALB is reachable only through CloudFront: port 80 from the CloudFront
+  # origin-facing managed prefix list and nothing else. A prefix list counts
+  # as one rule per entry against the security group rule quota; if an update
+  # fails on a quota, that is why.
+  AlbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: kb-mcp ALB, HTTP from CloudFront only
+      VpcId: !ImportValue kb-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: !Ref CloudFrontPrefixListId
+          Description: HTTP from the CloudFront origin-facing prefix list
+      Tags:
+        - Key: Name
+          Value: kb-alb-sg
+        - Key: Project
+          Value: kb-mcp
+
+  # No port 22. Use Session Manager for a shell.
+  AppSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: kb-mcp app instances, port 8000 from the ALB only
+      VpcId: !ImportValue kb-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref AlbSg
+          Description: App port from the ALB
+      Tags:
+        - Key: Name
+          Value: kb-app-sg
+        - Key: Project
+          Value: kb-mcp
+
+  # ------------------------------------------------------------ Load balancer
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref AlbSg
+      Subnets:
+        - !ImportValue kb-PublicSubnetA
+        - !ImportValue kb-PublicSubnetB
+      Tags:
+        - Key: Name
+          Value: kb-alb
+        - Key: Project
+          Value: kb-mcp
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !ImportValue kb-VpcId
+      Protocol: HTTP
+      Port: 8000
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+      Tags:
+        - Key: Name
+          Value: kb-tg
+        - Key: Project
+          Value: kb-mcp
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # --------------------------------------------------------------- CloudFront
+  # HTTPS for viewers on the default *.cloudfront.net certificate; the hop to
+  # the ALB is plain HTTP (known limitation, docs/PLAN.md "Auth and security").
+  #
+  # The managed policy IDs below come from docs/phases/10-cloudfront.md. They
+  # were NOT re-verified with `aws cloudfront list-cache-policies --type managed`
+  # and `aws cloudfront list-origin-request-policies --type managed` because
+  # there was no AWS access when this was written. Verify them before the
+  # first deploy.
+  #   CachingDisabled           4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+  #   CachingOptimized          658327ea-f89d-4fab-a63d-7e88639e58f6
+  #   AllViewerExceptHostHeader b689b0a8-53d0-40ab-baf2-68738e2966ac
+  #
+  # AllViewerExceptHostHeader forwards every viewer header, Authorization
+  # included, and query strings. The explicit /api/* and /mcp* behaviors repeat
+  # the default behavior on purpose: they make "never cached" visible here.
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      Tags:
+        - Key: Name
+          Value: kb-cdn
+        - Key: Project
+          Value: kb-mcp
+      DistributionConfig:
+        Comment: kb-mcp
+        Enabled: true
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+        Origins:
+          - Id: alb
+            DomainName: !GetAtt Alb.DNSName
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: http-only
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 5
+        DefaultCacheBehavior:
+          TargetOriginId: alb
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+          Compress: true
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: alb
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            Compress: true
+          - PathPattern: /mcp*
+            TargetOriginId: alb
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            Compress: true
+          - PathPattern: /static/*
+            TargetOriginId: alb
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            CachedMethods: [GET, HEAD]
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+            Compress: true
+
+  # --------------------------------------------------------------- Monitoring
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /kb/app
+      RetentionInDays: 14
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: kb-alerts
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+      Tags:
+        - Key: Project
+          Value: kb-mcp
+
+  # Search metrics come from kb/metrics.py: namespace KbMcp, dimension Mode
+  # (semantic or keyword), metrics LatencyMs, ConfidenceLevel, KeywordSearches.
+  # tests/test_infra.py checks that the alarms below use exactly those names.
+
+  # The demo (step 7) turns the fallback toggle on on purpose, so this alarm
+  # fires and then recovers during the demo.
+  KeywordModeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: kb-keyword-mode
+      AlarmDescription: The app answered at least one search in keyword mode (models failed, timed out or the fallback toggle is on). Fires on purpose in demo step 7.
+      Namespace: KbMcp
+      MetricName: KeywordSearches
+      Dimensions:
+        - Name: Mode
+          Value: keyword
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # Fires during the failover demo (step 8) when the instance is terminated.
+  UnhealthyHostAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: kb-unhealthy-host
+      AlarmDescription: The ALB sees an unhealthy target for 2 minutes. Fires on purpose in the failover demo (step 8) while the instance is replaced.
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Dimensions:
+        - Name: TargetGroup
+          Value: !GetAtt TargetGroup.TargetGroupFullName
+        - Name: LoadBalancer
+          Value: !GetAtt Alb.LoadBalancerFullName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # Missing data counts as breaching: with no target registered the ALB
+  # publishes nothing, which is exactly the outage this alarm is for. Also
+  # fires during the failover demo (step 8) once the old target is gone.
+  NoHealthyHostAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: kb-no-healthy-host
+      AlarmDescription: No healthy target behind the ALB for 3 minutes. Fires on purpose in the failover demo (step 8) while the instance is replaced.
+      Namespace: AWS/ApplicationELB
+      MetricName: HealthyHostCount
+      Dimensions:
+        - Name: TargetGroup
+          Value: !GetAtt TargetGroup.TargetGroupFullName
+        - Name: LoadBalancer
+          Value: !GetAtt Alb.LoadBalancerFullName
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  Target5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: kb-5xx
+      AlarmDescription: The app returned 5 or more 5xx responses in 5 minutes.
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt Alb.LoadBalancerFullName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # The EMF line carries LatencyMs only under the Mode dimension, so there is
+  # no metric without a dimension. Semantic search is what the model latency
+  # budget is about; slow keyword answers show up in kb-keyword-mode.
+  HighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: kb-high-latency
+      AlarmDescription: The 90th percentile of semantic search latency is above 2000 ms over 5 minutes. No data (no searches) counts as fine.
+      Namespace: KbMcp
+      MetricName: LatencyMs
+      Dimensions:
+        - Name: Mode
+          Value: semantic
+      ExtendedStatistic: p90
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 2000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # Published by the CloudWatch agent on the instance (see user data). The
+  # agent aggregates across instances, so the series survives a replacement.
+  MemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: kb-memory
+      AlarmDescription: Host memory use averaged above 85 percent for 10 minutes.
+      Namespace: CWAgent
+      MetricName: mem_used_percent
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AppAsg
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: kb-mcp
+      DashboardBody: !Sub
+        - |
+          {
+            "widgets": [
+              {
+                "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
+                "properties": {
+                  "title": "Search latency (p90, ms)", "region": "${AWS::Region}", "view": "timeSeries", "period": 60,
+                  "metrics": [
+                    ["KbMcp", "LatencyMs", "Mode", "semantic", {"stat": "p90", "label": "semantic"}],
+                    ["KbMcp", "LatencyMs", "Mode", "keyword", {"stat": "p90", "label": "keyword"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
+                "properties": {
+                  "title": "Searches per minute by mode", "region": "${AWS::Region}", "view": "timeSeries", "period": 60,
+                  "metrics": [
+                    ["KbMcp", "LatencyMs", "Mode", "semantic", {"stat": "SampleCount", "label": "semantic"}],
+                    ["KbMcp", "LatencyMs", "Mode", "keyword", {"stat": "SampleCount", "label": "keyword"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric", "x": 0, "y": 6, "width": 12, "height": 6,
+                "properties": {
+                  "title": "Healthy and unhealthy hosts", "region": "${AWS::Region}", "view": "timeSeries", "period": 60,
+                  "metrics": [
+                    ["AWS/ApplicationELB", "HealthyHostCount", "TargetGroup", "${TgName}", "LoadBalancer", "${AlbName}", {"stat": "Minimum", "label": "healthy"}],
+                    ["AWS/ApplicationELB", "UnHealthyHostCount", "TargetGroup", "${TgName}", "LoadBalancer", "${AlbName}", {"stat": "Maximum", "label": "unhealthy"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric", "x": 12, "y": 6, "width": 12, "height": 6,
+                "properties": {
+                  "title": "Memory used (percent)", "region": "${AWS::Region}", "view": "timeSeries", "period": 300,
+                  "metrics": [
+                    ["CWAgent", "mem_used_percent", "AutoScalingGroupName", "${AsgName}", {"stat": "Average"}]
+                  ]
+                }
+              }
+            ]
+          }
+        - TgName: !GetAtt TargetGroup.TargetGroupFullName
+          AlbName: !GetAtt Alb.LoadBalancerFullName
+          AsgName: !Ref AppAsg
+
+  # ----------------------------------------------------------- Launch template
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Name: LabInstanceProfile
+        # IMDSv2 is required. The hop limit is 2 (not 1) because the container
+        # sits behind the Docker bridge and needs the instance role for SSM and S3
+        # (deviation 1 in docs/PROGRESS.md). The SSRF guard in ingest_url blocks
+        # 169.254.169.254 for user-supplied URLs.
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: false
+            Groups:
+              - !Ref AppSg
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 30
+              VolumeType: gp2  # sandbox allows gp2 only, up to 35 GB
+              Encrypted: true
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: kb-app
+              - Key: Project
+                Value: kb-mcp
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: kb-app
+              - Key: Project
+                Value: kb-mcp
+        # Inline user data (deviation 2 in docs/PROGRESS.md). Inside Fn::Sub a
+        # literal shell brace expression must be written with an exclamation mark
+        # after the dollar and open brace; plain $VAR needs no escaping.
+        # The Sub variables are: Bucket, LogGroupName (map below), ImageTag,
+        # MetricsMode and ExtensionOrigin (parameters), AWS::Region and
+        # AWS::StackName (pseudo parameters).
+        UserData:
+          Fn::Base64: !Sub
+            - |
+              #!/bin/bash
+              set -euxo pipefail
+              exec > >(tee -a /var/log/kb-bootstrap.log) 2>&1
+
+              # Report the outcome to CloudFormation on every exit path. STATUS only
+              # becomes 0 once /healthz answers, so any earlier failure (set -e,
+              # explicit exit, a failed restore) signals failure and the stack rolls back
+              # without waiting for the 15 minute creation timeout.
+              STATUS=1
+              INSTANCE_ID=""
+              signal_stack() {
+                local id_args=()
+                if [ -n "$INSTANCE_ID" ]; then
+                  id_args=(--id "$INSTANCE_ID")
+                fi
+                /opt/aws/bin/cfn-signal -e "$STATUS" "${!id_args[@]}" \
+                  --stack ${AWS::StackName} --resource AppAsg --region ${AWS::Region} || true
+              }
+              trap signal_stack EXIT
+
+              # retry ATTEMPTS DELAY_SECONDS COMMAND...
+              retry() {
+                local attempts=$1 delay=$2 n=1
+                shift 2
+                until "$@"; do
+                  if [ "$n" -ge "$attempts" ]; then
+                    return 1
+                  fi
+                  n=$((n + 1))
+                  sleep "$delay"
+                done
+              }
+
+              # Read one IMDSv2 metadata path. Tracing is off inside so the session
+              # token never reaches the log.
+              imds() {
+                set +x
+                local token
+                token=$(curl -sf -X PUT http://169.254.169.254/latest/api/token \
+                  -H 'X-aws-ec2-metadata-token-ttl-seconds: 120')
+                curl -sf -H "X-aws-ec2-metadata-token: $token" \
+                  "http://169.254.169.254/latest/meta-data/$1"
+              }
+
+              # 1. Packages and services. The NAT route can lag the first boot, so retry.
+              retry 5 15 dnf install -y docker aws-cfn-bootstrap cronie amazon-cloudwatch-agent
+              systemctl enable --now docker crond
+              INSTANCE_ID=$(retry 5 3 imds instance-id)
+
+              # 2. The database lives on this instance's root volume (kb/snapshot.py
+              # uploads it to S3 after every write). /data is a plain directory owned
+              # by the container user. It survives a reboot with the volume; a
+              # replacement instance starts empty and restores in step 4.
+              mkdir -p /data
+              chown 10001:10001 /data
+
+              # 3. Fetch the image from S3 with the instance role (the sandbox has
+              # no ECR). The download goes through the S3 gateway endpoint, not the
+              # NAT. It is streamed, so no tarball lands on disk. pipefail makes a
+              # truncated download fail the load, and the retry starts over.
+              IMAGE="kb-mcp:${ImageTag}"
+              IMAGE_URI="s3://${Bucket}/images/kb-mcp-${ImageTag}.tar.gz"
+              load_image() {
+                aws s3 cp "$IMAGE_URI" - --region ${AWS::Region} | gunzip -c | docker load
+              }
+              retry 5 10 load_image
+              docker image inspect "$IMAGE" > /dev/null
+
+              # 4. Restore the database before the app starts: the snapshot
+              # (snapshots/kb-latest.db.gz), else the newest nightly backup, else
+              # nothing (exit 0, the app creates an empty database). If S3 cannot be
+              # read this fails and the boot fails: starting empty would let the
+              # first write overwrite the snapshot of the real data.
+              restore_db() {
+                docker run --rm \
+                  -v /data:/data \
+                  -e KB_DB=/data/kb.db \
+                  -e KB_BUCKET=${Bucket} \
+                  -e AWS_REGION=${AWS::Region} \
+                  "$IMAGE" \
+                  python -m kb.cli restore --latest --force --target /data/kb.db
+              }
+              retry 5 15 restore_db
+
+              # CloudWatch agent: host memory and disk metrics (namespace CWAgent),
+              # also aggregated per Auto Scaling group for the kb-memory alarm. A
+              # failure here is logged but does not stop the app from starting.
+              CWA_HOME=/opt/aws/amazon-cloudwatch-agent
+              cat > "$CWA_HOME/etc/kb-agent.json" <<'CWA_CONFIG'
+              {
+                "agent": {"metrics_collection_interval": 60, "run_as_user": "root"},
+                "metrics": {
+                  "namespace": "CWAgent",
+                  "append_dimensions": {
+                    "AutoScalingGroupName": "${!aws:AutoScalingGroupName}",
+                    "InstanceId": "${!aws:InstanceId}"
+                  },
+                  "aggregation_dimensions": [["AutoScalingGroupName"]],
+                  "metrics_collected": {
+                    "mem": {"measurement": ["mem_used_percent"]},
+                    "disk": {"measurement": ["disk_used_percent"], "resources": ["/"]}
+                  }
+                }
+              }
+              CWA_CONFIG
+              "$CWA_HOME/bin/amazon-cloudwatch-agent-ctl" -a fetch-config -m ec2 \
+                -c "file:$CWA_HOME/etc/kb-agent.json" -s \
+                || echo "cloudwatch agent did not start" >&2
+
+              # Container logs go to CloudWatch Logs with Docker's awslogs driver
+              # (deviation 3). awslogs-format=json/emf makes CloudWatch read the
+              # _aws block of the search metric lines (kb/metrics.py) as metrics;
+              # other lines are stored as plain log events.
+              LOG_OPTS=(
+                --log-driver awslogs
+                --log-opt awslogs-region=${AWS::Region}
+                --log-opt awslogs-group=${LogGroupName}
+                --log-opt "awslogs-stream=$INSTANCE_ID"
+                --log-opt awslogs-format=json/emf
+              )
+
+              # 5. Run the container. The write tokens are read from SSM by the app
+              # through the instance role, so no secret appears here.
+              # --stop-timeout 30: docker stop sends SIGTERM and waits up to 30 s,
+              # long enough for the lifespan shutdown to upload a last snapshot.
+              # KB_PROXY_HOPS=2: CloudFront and the ALB each append one entry to
+              # X-Forwarded-For, and the rate limit reads the client from the right
+              # (kb/clientip.py). Use 1 if the ALB is ever reached without CloudFront.
+              docker run -d --name kb --restart unless-stopped \
+                --stop-timeout 30 \
+                -p 8000:8000 \
+                -v /data:/data \
+                -e KB_DB=/data/kb.db \
+                -e KB_BUCKET=${Bucket} \
+                -e AWS_REGION=${AWS::Region} \
+                -e KB_METRICS_MODE=${MetricsMode} \
+                -e "KB_EXTENSION_ORIGIN=${ExtensionOrigin}" \
+                -e KB_PROXY_HOPS=2 \
+                "${!LOG_OPTS[@]}" \
+                "$IMAGE"
+
+              # Nightly SQLite backup to s3://<bucket>/backups/ at 07:15 UTC (about
+              # 2:15 AM Central). crond was enabled with the packages above. The
+              # container has KB_DB and KB_BUCKET; output goes to /var/log/kb-backup.log.
+              printf '%s\n' \
+                '15 7 * * * root docker exec kb python -m kb.cli backup >> /var/log/kb-backup.log 2>&1' \
+                > /etc/cron.d/kb-backup
+              chmod 0644 /etc/cron.d/kb-backup
+
+              # 6. Wait up to 10 minutes for the app, then let the EXIT trap send the
+              # signal (0 on success, 1 on timeout).
+              deadline=$((SECONDS + 600))
+              while [ "$SECONDS" -lt "$deadline" ]; do
+                if curl -sf http://localhost:8000/healthz > /dev/null; then
+                  STATUS=0
+                  break
+                fi
+                sleep 5
+              done
+              if [ "$STATUS" -ne 0 ]; then
+                echo "app did not become healthy within 10 minutes" >&2
+                docker logs --tail 100 kb || true
+                exit 1
+              fi
+            - Bucket: !ImportValue kb-BucketName
+              LogGroupName: !Ref AppLogGroup
+
+  # --------------------------------------------------------- Auto Scaling group
+  # Max stays at 1: the vector index lives in process memory and SQLite has a
+  # single writer. The group spans both private subnets, so a replacement can
+  # land in the other AZ; it restores the database from the S3 snapshot. The image
+  # tag is part of the user data, so a new ImageTag creates a new launch template
+  # version and triggers the rolling update.
+  AppAsg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - PrivateDefaultRoute
+      - Listener
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 0
+        MaxBatchSize: 1
+        WaitOnResourceSignals: true
+        PauseTime: PT15M
+    Properties:
+      MinSize: '1'
+      MaxSize: '1'
+      DesiredCapacity: '1'
+      VPCZoneIdentifier:
+        - !ImportValue kb-PrivateSubnetA
+        - !ImportValue kb-PrivateSubnetB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      HealthCheckType: ELB
+      # Boot order is packages, image download and load (S3), database restore,
+      # then the app (model load and index build), all before /healthz answers.
+      # Expected to take a few minutes (not measured yet); 600 s leaves room. The restore finishes before
+      # the app starts, so the app never serves a half restored database.
+      HealthCheckGracePeriod: 600
+      Tags:
+        - Key: Name
+          Value: kb-app
+          PropagateAtLaunch: true
+        - Key: Project
+          Value: kb-mcp
+          PropagateAtLaunch: true
+
+Outputs:
+  DistributionDomainName:
+    Description: CloudFront domain name (use https://<this>/mcp for Claude Code)
+    Value: !GetAtt Distribution.DomainName
+  DistributionId:
+    Description: CloudFront distribution ID (aws cloudfront wait distribution-deployed --id <this>)
+    Value: !Ref Distribution
+  AlertTopicArn:
+    Description: SNS topic that receives the alarm emails
+    Value: !Ref AlertTopic
+  AppLogGroupName:
+    Description: CloudWatch Logs group for the container logs
+    Value: !Ref AppLogGroup
+  AlbDnsName:
+    Description: Public DNS name of the load balancer
+    Value: !GetAtt Alb.DNSName
+  AsgName:
+    Description: Auto Scaling group name
+    Value: !Ref AppAsg
+  TargetGroupArn:
+    Description: Target group ARN
+    Value: !Ref TargetGroup
+  LoadBalancerFullName:
+    Description: Load balancer full name (CloudWatch alarm dimension)
+    Value: !GetAtt Alb.LoadBalancerFullName
+  TargetGroupFullName:
+    Description: Target group full name (CloudWatch alarm dimension)
+    Value: !GetAtt TargetGroup.TargetGroupFullName
