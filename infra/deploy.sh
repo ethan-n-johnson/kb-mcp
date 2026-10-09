@@ -15,8 +15,9 @@
 #   KB_ALERT_EMAIL                address for the alarm emails
 # and takes three optional values:
 #   KB_INSTANCE_PROFILE           existing instance profile for the app instances,
-#                                 default EMR_EC2_DefaultRole (the Cloud Architecting
-#                                 sandbox; Learner Lab has LabInstanceProfile)
+#                                 default myS3Role (the only profile the Cloud
+#                                 Architecting sandbox lets you pass; Learner Lab
+#                                 has LabInstanceProfile)
 #   KB_METRICS_MODE               api (default) or emf, how the app publishes
 #                                 search metrics (see kb/metrics.py); emf needs an
 #                                 instance role that can write CloudWatch Logs
@@ -110,7 +111,7 @@ case "$1" in
       "CloudFrontPrefixListId=$KB_CLOUDFRONT_PREFIX_LIST_ID" \
       "AlertEmail=$KB_ALERT_EMAIL" \
       "MetricsMode=${KB_METRICS_MODE:-api}" \
-      "InstanceProfileName=${KB_INSTANCE_PROFILE:-EMR_EC2_DefaultRole}" \
+      "InstanceProfileName=${KB_INSTANCE_PROFILE:-myS3Role}" \
       "ExtensionOrigin=${KB_EXTENSION_ORIGIN:-}"
     print_output AlbDnsName "ALB DNS name"
     print_output DistributionDomainName "CloudFront domain name"

@@ -21,7 +21,7 @@
    - `AppSg`: ingress TCP 8000 from `AlbSg` only. No port 22.
 4. Load balancer: internet-facing ALB in both public subnets; target group HTTP 8000, target type `instance`, health check `/healthz`, interval 15 s, timeout 5 s, healthy threshold 2, unhealthy threshold 3, matcher 200, deregistration delay 30 s; listener on 80 forwarding to it.
 5. Launch template:
-   - Instance profile from the `InstanceProfileName` parameter, default `EMR_EC2_DefaultRole` (`LabInstanceProfile` does not exist in this sandbox, deviation 8 in PROGRESS.md); no public IP; `MetadataOptions`: `HttpTokens: required`, `HttpPutResponseHopLimit: 2` (deviation 1: the container needs the instance role for S3).
+   - Instance profile from the `InstanceProfileName` parameter, default `myS3Role`, the one profile the lab user may pass (`LabInstanceProfile` does not exist in this sandbox, deviation 8 in PROGRESS.md); no public IP; `MetadataOptions`: `HttpTokens: required`, `HttpPutResponseHopLimit: 2` (deviation 1: the container needs the instance role for S3).
    - Root volume 30 GiB gp2 (the sandbox allows gp2 only, up to 35 GB), encrypted. KMS is list only in this sandbox, so if the launch fails with `Client.InternalError`, set `Encrypted: false` in the launch template, record the change in `docs/PROGRESS.md` (deviations) and `docs/SECURITY_REVIEW.md`, and tell the user.
    - `UserData` inline with `Fn::Base64` + `!Sub` (deviation 2). Remember: inside `!Sub`, a literal shell `${VAR}` must be written `${!VAR}`. The script (`set -euxo pipefail`, log to `/var/log/kb-bootstrap.log`):
      1. `dnf install -y docker aws-cfn-bootstrap cronie`; enable and start `docker` and `crond` (retry: the NAT route can lag the first boot).

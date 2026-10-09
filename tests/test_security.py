@@ -864,3 +864,16 @@ def test_the_image_does_not_trust_a_forwarded_for_header_it_cannot_verify() -> N
     cmd = next(line for line in dockerfile.splitlines() if line.startswith("CMD"))
     assert "--no-proxy-headers" in cmd and "--forwarded-allow-ips" not in cmd
     assert '"--workers", "1"' in cmd
+
+
+def test_the_image_makes_the_code_readable_for_the_runtime_user() -> None:
+    """COPY keeps the build machine's modes; owner-only files broke the boot (seen on the first sandbox boot, 2026-10-09)."""
+    dockerfile = (Path(__file__).parent.parent / "Dockerfile").read_text(encoding="utf-8")
+    flat = dockerfile.replace("\\\n", " ")
+    lines = flat.splitlines()
+    user = next(i for i, line in enumerate(lines) if line.startswith("USER 10001"))
+    chmod = next(i for i, line in enumerate(lines) if "chmod -R a+rX /app" in line)
+    assert chmod < user and 'purelib"])\')/kb"' in lines[chmod]
+    # The first command run as the runtime user imports the app, so unreadable code fails the build.
+    after = "\n".join(lines[user:])
+    assert "import kb.cli, kb.main;" in after.split("from fastembed", 1)[0]

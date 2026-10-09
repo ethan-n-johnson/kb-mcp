@@ -79,7 +79,7 @@ Allowed (per the lab list): CloudFormation, CloudFront, CloudWatch, EC2 (`t3.med
 Blocked: **ECR** (`ecr:CreateRepository` is AccessDenied) and **EFS** (`elasticfilesystem:CreateFileSystem` is AccessDenied), both probed from the lab terminal role `runserver`. So the image travels as a tarball through S3 (`infra/push-image.sh`, user data `docker load`) and the database lives on the instance root volume with S3 snapshots instead of a shared file system.
 
 - Region `us-east-1` only.
-- No custom IAM roles or policies (IAM is read only). `LabInstanceProfile` does not exist here; the instances use `EMR_EC2_DefaultRole`, which allows S3, CloudWatch metrics and `ec2:DescribeTags` but not SSM or CloudWatch Logs (deviation 8 in `docs/PROGRESS.md`). Do not add anything that needs SSM or CloudWatch Logs on the instance.
+- No custom IAM roles or policies (IAM is read only). `LabInstanceProfile` does not exist here, and the lab user may only pass `myS3Role` to an instance (`iam:PassRole` denies `EMR_EC2_DefaultRole`). `myS3Role` allows S3 and nothing else (deviation 8 in `docs/PROGRESS.md`). Do not add anything the instance needs beyond S3; custom CloudWatch metrics cannot be published from it.
 - KMS is list only, so an encrypted root volume may fail with `Client.InternalError`; the fallback is `Encrypted: false`, recorded in `docs/PROGRESS.md`.
 - More than 9 instances suspends the account. The Auto Scaling group is max 1; never launch other instances.
 - Credentials are temporary. If an AWS call fails with `ExpiredToken` or `InvalidClientTokenId`, stop and ask the user to refresh `~/.aws/credentials` from the AWS Academy console (**HUMAN**).

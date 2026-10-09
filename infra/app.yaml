@@ -13,8 +13,8 @@ Parameters:
     Description: EC2 instance type for the app server.
   InstanceProfileName:
     Type: String
-    Default: EMR_EC2_DefaultRole
-    Description: Existing instance profile for the app instances (the sandbox cannot create IAM roles). It must allow S3 on the data bucket, cloudwatch:PutMetricData and ec2:DescribeTags; SSM and CloudWatch Logs are not needed (deviation 8 in docs/PROGRESS.md). The Cloud Architecting 3 sandbox has EMR_EC2_DefaultRole; Learner Lab has LabInstanceProfile. infra/deploy.sh reads it from KB_INSTANCE_PROFILE.
+    Default: myS3Role
+    Description: Existing instance profile for the app instances (the sandbox cannot create IAM roles). It must allow S3 on the data bucket; nothing else is required (deviation 8 in docs/PROGRESS.md). In the Cloud Architecting 3 sandbox myS3Role (S3 only) is the one profile the lab user may pass to an instance (EMR_EC2_DefaultRole is denied by iam:PassRole), so the search metrics and the CloudWatch agent cannot publish there. Learner Lab has LabInstanceProfile. infra/deploy.sh reads it from KB_INSTANCE_PROFILE.
     AllowedPattern: '^[A-Za-z0-9+=,.@_-]{1,128}$'
     ConstraintDescription: An IAM instance profile name.
   AmiId:

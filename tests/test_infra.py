@@ -170,11 +170,11 @@ def test_container_logs_stay_on_the_instance(resources: dict[str, Any]) -> None:
     assert of_type(resources, "AWS::Logs::LogGroup") == {}
 
 
-def test_instance_profile_is_a_parameter_defaulting_to_the_sandbox_role(app: dict[str, Any]) -> None:
+def test_instance_profile_is_a_parameter_defaulting_to_the_passable_sandbox_role(app: dict[str, Any]) -> None:
     data = app["Resources"]["LaunchTemplate"]["Properties"]["LaunchTemplateData"]
     assert data["IamInstanceProfile"] == {"Name": {"Ref": "InstanceProfileName"}}
     param = app["Parameters"]["InstanceProfileName"]
-    assert param["Default"] == "EMR_EC2_DefaultRole"
+    assert param["Default"] == "myS3Role"
     for name in ("EMR_EC2_DefaultRole", "LabInstanceProfile", "my-role.v2"):
         assert re.fullmatch(param["AllowedPattern"], name), name
     for bad in ("", "a b", "role;rm", "x" * 129):
@@ -703,7 +703,7 @@ def test_deploy_app_passes_all_parameters_to_cloudformation(stub_bin: Path) -> N
         "CloudFrontPrefixListId=pl-3b927c52",
         "AlertEmail=me@example.com",
         "MetricsMode=api",
-        "InstanceProfileName=EMR_EC2_DefaultRole",
+        "InstanceProfileName=myS3Role",
         "ExtensionOrigin=",
     ]
     assert any("DistributionDomainName" in c for c in calls(stub_bin))
@@ -1034,7 +1034,7 @@ def test_up_from_an_empty_account_deploys_everything_in_order(up_env: dict[str, 
     steps = [c.split()[0] + " " + c.split()[1] for c in up_calls(up_env) if not c.startswith("aws ")]
     assert steps == ["deploy.sh network", "deploy.sh data", "push-image.sh --build", "deploy.sh app"]
     app = next(c for c in up_calls(up_env) if c.startswith("deploy.sh app"))
-    assert "profile=EMR_EC2_DefaultRole" in app and "pl=pl-0123456789abcdef0" in app
+    assert "profile=myS3Role" in app and "pl=pl-0123456789abcdef0" in app
     assert "email=me@example.com" in app
     # New tokens were generated into a private file, uploaded, and never printed.
     tokens = (up_env["config"] / "write-tokens").read_text(encoding="utf-8").strip()

@@ -268,7 +268,7 @@ KB_CLOUDFRONT_PREFIX_LIST_ID=pl-xxxxxxxx KB_ALERT_EMAIL=you@example.com \
   infra/deploy.sh app "$TAG"     # NAT, ALB, Auto Scaling, CloudFront, alarms (phases 06, 10, 15)
 ```
 
-The app instances use the existing `EMR_EC2_DefaultRole` instance profile, because the sandbox has no `LabInstanceProfile` and does not allow creating roles. To use another profile (for example `LabInstanceProfile` in Learner Lab), set `KB_INSTANCE_PROFILE=<name>` in front of `infra/deploy.sh app`.
+The app instances use the existing `myS3Role` instance profile: the sandbox has no `LabInstanceProfile`, does not allow creating roles, and only lets you pass `myS3Role` to an instance (with `EMR_EC2_DefaultRole` the deploy fails with "You are not authorized to use launch template"). To use another profile (for example `LabInstanceProfile` in Learner Lab), set `KB_INSTANCE_PROFILE=<name>` in front of `infra/deploy.sh app`.
 
 If the app stack fails, show only the failures:
 
@@ -300,10 +300,13 @@ To save sandbox credit between sessions, delete only the app stack with `infra/t
 | `cfn-lint not found` | Project virtualenv missing: Linux step 6 |
 | `docker: command not found` | Docker not installed: Linux step 3 (Fedora has its own commands) |
 | `fatal: not a git repository` from `push-image.sh` | The folder has no `.git`: Linux step 5 |
-| `Invalid IAM Instance Profile name` when deploying the app stack | The profile does not exist in this sandbox. The default is `EMR_EC2_DefaultRole`; check with `aws iam list-instance-profiles --query 'InstanceProfiles[].InstanceProfileName'` and set `KB_INSTANCE_PROFILE` |
+| `Invalid IAM Instance Profile name` when deploying the app stack | The profile does not exist in this sandbox. The default is `myS3Role`; check with `aws iam list-instance-profiles --query 'InstanceProfiles[].InstanceProfileName'` and set `KB_INSTANCE_PROFILE` |
 | `config/write-tokens is missing` in the debug boot log | Step 5 of phase 01 was not run (or wrote to SSM only): run it, then redeploy |
 | AWS CLI output opens in a pager and stops at `:` | Press `q`; turn the pager off once with `aws configure set cli_pager ""` |
 | `account ID` changed and `describe-stacks` shows none of the `kb-` stacks | The sandbox reset to a new account: run `infra/up.sh` (it rebuilds everything; the knowledge base comes back only from a snapshot saved with `infra/up.sh save`) |
+| `You are not authorized to use launch template` | The lab user may not pass that instance profile (`iam:PassRole`). Use `myS3Role` (the default) |
+| `put_metric_data failed, will retry` warnings in the container log | Expected in the sandbox: `myS3Role` cannot publish metrics. Searches are not affected |
+| Boot log shows `PermissionError: [Errno 13] Permission denied: '/app/kb/__init__.py'` | The image was built from owner-only files (fixed in the Dockerfile on 2026-10-09). Rebuild with `infra/push-image.sh --build`; optionally also run `chmod -R go+rX .` in the repo |
 | `syntax error near unexpected token 'newline'` | A placeholder like `<tag>` was typed literally: use the real tag, or `"$TAG"` |
 | `$'\r': command not found` running a script | Windows line endings: `git config --global core.autocrlf input`, then re-clone inside WSL |
 

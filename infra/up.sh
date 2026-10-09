@@ -9,7 +9,7 @@
 #                        the next account so the knowledge base survives a reset)
 #
 # Steps of infra/up.sh:
-#   1. Check the AWS credentials and the instance profile (EMR_EC2_DefaultRole).
+#   1. Check the AWS credentials and the instance profile (myS3Role).
 #   2. Deploy kb-network and kb-data (infra/deploy.sh; no-ops when unchanged).
 #   3. Write tokens: if s3://<bucket>/config/write-tokens is missing, upload the
 #      local tokens file, or generate new tokens into it first. Never printed.
@@ -24,7 +24,7 @@
 # Local files, all outside the repo (KB_CONFIG_DIR, default ~/.config/kb-mcp):
 #   up.env           settings, read as shell variables:
 #                      KB_ALERT_EMAIL=you@example.com          (required)
-#                      KB_INSTANCE_PROFILE=EMR_EC2_DefaultRole (optional)
+#                      KB_INSTANCE_PROFILE=myS3Role            (optional)
 #                      KB_METRICS_MODE, KB_EXTENSION_ORIGIN     (optional, see deploy.sh)
 #   write-tokens     name:secret,name:secret (created on the first run if missing)
 #   kb-latest.db.gz  the snapshot saved by "infra/up.sh save"
@@ -124,7 +124,7 @@ if [ -z "${KB_ALERT_EMAIL:-}" ]; then
   echo "  KB_ALERT_EMAIL=you@example.com" >&2
   exit 2
 fi
-export KB_INSTANCE_PROFILE="${KB_INSTANCE_PROFILE:-EMR_EC2_DefaultRole}"
+export KB_INSTANCE_PROFILE="${KB_INSTANCE_PROFILE:-myS3Role}"
 
 # --- 1. credentials and instance profile -------------------------------------------
 check_credentials

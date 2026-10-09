@@ -4,7 +4,7 @@
 
 ## Goal
 
-Search metrics, host memory and disk metrics, alarms, and email alerts through SNS. The keyword-mode alarm email is part of demo step 7.
+Search metrics, host memory and disk metrics, alarms, and email alerts through SNS. The keyword-mode alarm email was part of demo step 7; in the sandbox the instance role cannot publish custom metrics, so step 7 uses the `kb-no-healthy-host` alarm during an instance replacement (deviation 8).
 
 **Sandbox (deviation 8 in PROGRESS.md):** the instance role cannot write CloudWatch Logs, so there is no log group and no `awslogs` driver. Container logs stay on the instance (Docker `local` driver), and search metrics are sent with `put_metric_data` (`MetricsMode=api`, the default). Tasks 1, 2, 3 and 4a below describe the original design and are replaced by that.
 
@@ -37,7 +37,7 @@ Search metrics, host memory and disk metrics, alarms, and email alerts through S
 
 ## Do not
 
-- Create IAM roles or policies (IAM is read only; `EMR_EC2_DefaultRole` has `cloudwatch:PutMetricData`; if a call is denied, record it and ask).
+- Create IAM roles or policies (IAM is read only; the instance role `myS3Role` cannot publish metrics, so the `KbMcp` and `CWAgent` alarms get no data in this sandbox, deviation 8).
 - Alarm on things the demo deliberately triggers without saying so in the alarm description.
 
 ## Acceptance
@@ -45,5 +45,5 @@ Search metrics, host memory and disk metrics, alarms, and email alerts through S
 - [ ] `aws cloudwatch list-metrics --namespace KbMcp` and `--namespace CWAgent` both return metrics.
 - [ ] After an upload, `aws s3api head-object --bucket <bucket> --key snapshots/kb-latest.db.gz` shows a `LastModified` within the last minute.
 - [ ] All six alarms exist and are `OK` (or `INSUFFICIENT_DATA` for the latency one before traffic).
-- [ ] The user received the keyword-mode alarm email and the OK email.
+- [ ] The user received an alarm email and the OK email (in the sandbox: `kb-no-healthy-host`, deviation 8).
 - [ ] Phase log updated; commit `phase 15: monitoring and alarms`.

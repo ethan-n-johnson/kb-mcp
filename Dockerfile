@@ -25,10 +25,15 @@ COPY seeds/ ./seeds/
 # Non-root runtime user. /models is filled below as this user, so no chown layer
 # duplicates the model files. /data holds the SQLite database; on the instance it is a
 # host directory bind mounted here and snapshotted to S3 (kb/snapshot.py).
+# COPY keeps the build machine's file modes, so a checkout with owner-only files
+# (mode 600) would leave the code unreadable for this user ("Permission denied:
+# /app/kb/__init__.py" at boot). Make the code and the installed package readable by
+# everyone; nothing here is secret.
 RUN groupadd --gid 10001 kb \
     && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin kb \
     && mkdir -p /models /data \
-    && chown 10001:10001 /models /data
+    && chown 10001:10001 /models /data \
+    && chmod -R a+rX /app "$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/kb"
 
 USER 10001:10001
 
@@ -37,7 +42,10 @@ ENV KB_MODEL_DIR=/models \
 
 # Download both ONNX models into /models during the build and run one tiny
 # inference each, so a broken download fails the build instead of the first request.
+# Importing kb.cli and kb.main here, as the runtime user, also fails the build when the
+# code is not readable by that user.
 RUN python -c "import os; \
+import kb.cli, kb.main; \
 from fastembed import TextEmbedding; \
 from fastembed.rerank.cross_encoder import TextCrossEncoder; \
 d = os.environ['KB_MODEL_DIR']; \
