@@ -1,4 +1,4 @@
-"""The 11 MCP tools: thin wrappers over `kb.service`, shared by HTTP and stdio.
+"""The 12 MCP tools: thin wrappers over `kb.service`, shared by HTTP and stdio.
 
 `build_mcp(state)` returns an `MCPServer` (the `mcp` 2.x name of what 1.x called
 `FastMCP`) with the tool set from PLAN.md. Tools hold no business logic: they
@@ -20,6 +20,7 @@ import logging
 import os
 import sqlite3
 from collections.abc import Callable
+from pathlib import Path
 from typing import Annotated, Any, TypeVar
 
 from mcp.server.mcpserver import Context, MCPServer
@@ -31,6 +32,7 @@ from starlette.concurrency import run_in_threadpool
 from kb import db, service
 from kb.auth import bearer_secret, check_token
 from kb.errors import ServiceError
+from kb.ingest.convert import detect_format
 from kb.ingest.errors import IngestError
 from kb.ratelimit import check_search_rate
 from kb.schemas import UploadRequest
@@ -47,6 +49,7 @@ TOOL_NAMES = (
     "search",
     "get",
     "upload",
+    "upload_file",
     "update",
     "delete",
     "merge",
@@ -85,6 +88,15 @@ DESCRIPTIONS: dict[str, str] = {
         "the candidates and ask whether to update one of them, merge, or save anyway with "
         "force=true. A `duplicate` result means identical content is already stored. "
         "Needs a write token."
+    ),
+    "upload_file": (
+        "Save a whole file (PDF, Markdown, text or HTML) from disk. Use it when the user "
+        "attaches or points to a file to keep; prefer it over `upload` for any file, since "
+        "nothing is copied into the tool call. Over HTTP it returns a one-time `url` (valid 15 minutes, "
+        "one file): send the file's bytes as the body of a POST there, for example with the "
+        "returned `curl` command after replacing the placeholder with the file's path, and "
+        "read the upload result from the response. On a local (stdio) server `filename` is "
+        "the file's path and the file is stored right away. Needs a write token."
     ),
     "update": (
         "Change an existing document: new `content` (Markdown by default; set `format` to "
@@ -185,7 +197,7 @@ def _as_tool_error(exc: Exception) -> Exception:
 
 
 def build_mcp(source: SearchStateSource, *, stdio: bool = False) -> MCPServer:
-    """Build the MCP server with the 11 tools.
+    """Build the MCP server with the 12 tools.
 
     `source` is the shared `SearchState`, or a function returning it: the HTTP
     app creates its state in the FastAPI lifespan, after the tools are built.
@@ -278,6 +290,51 @@ def build_mcp(source: SearchStateSource, *, stdio: bool = False) -> MCPServer:
             return service.upload(conn, req, actor, search_state=state()).payload()
 
         return await call_write(ctx, run)
+
+    @mcp.tool(name="upload_file", description=DESCRIPTIONS["upload_file"], annotations=WRITE)
+    async def upload_file(
+        ctx: Context,
+        filename: Annotated[
+            str,
+            Field(
+                description="The file's name, e.g. guide.pdf (its extension picks the format); "
+                "on a local stdio server, its path",
+                max_length=1000,
+            ),
+        ],
+        title: Annotated[str | None, Field(description="Document title (default: from the file)")] = None,
+        tags: Annotated[list[str] | None, Field(description="Tags to attach")] = None,
+        force: Annotated[bool, Field(description="Save even if it looks like a near-duplicate")] = False,
+    ) -> dict[str, Any]:
+        request = ctx.request_context.request
+        if request is None and stdio:
+            path = Path(filename).expanduser()
+
+            def run_local(conn: sqlite3.Connection, actor: str) -> dict[str, Any]:
+                try:
+                    data = path.read_bytes()
+                except OSError as exc:
+                    raise ServiceError("bad_path", f"cannot read {path}: {exc.strerror}", 400) from exc
+                req = UploadRequest(
+                    title=title, content="", format=detect_format(filename=path.name),
+                    tags=tags or [], force=force,
+                )
+                return service.upload(
+                    conn, req, actor, filename=path.name, file_bytes=data, search_state=state()
+                ).payload()
+
+            return await call_write(ctx, run_local)
+
+        def run_link(conn: sqlite3.Connection, actor: str) -> dict[str, Any]:
+            base = state().settings.public_url
+            if base is None:
+                assert request is not None
+                base = str(request.base_url).rstrip("/")
+            return service.create_upload_link(
+                actor, filename, base, title=title, tags=tags, force=force
+            ).model_dump()
+
+        return await call_write(ctx, run_link)
 
     @mcp.tool(name="update", description=DESCRIPTIONS["update"], annotations=WRITE)
     async def update(

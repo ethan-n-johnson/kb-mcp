@@ -548,7 +548,7 @@ def test_user_data_loads_the_image_from_s3_not_a_registry(resources: dict[str, A
     assert "retry 5 10 load_image" in rendered
     assert "docker pull" not in rendered and "docker login" not in rendered and "docker tag" not in rendered
     template, variables = user_data_parts(resources)
-    assert set(variables) == {"Bucket"}
+    assert set(variables) == {"Bucket", "PublicHost"}
     assert variables["Bucket"] == {"Fn::ImportValue": "kb-BucketName"}
 
 
@@ -1157,3 +1157,9 @@ def test_up_rejects_unknown_arguments(up_env: dict[str, Path]) -> None:
     assert run_up(up_env, "deploy").returncode == 2
     assert run_up(up_env, "save", "extra").returncode == 2
 
+
+
+def test_user_data_passes_the_cloudfront_address_for_upload_links(resources: dict[str, Any]) -> None:
+    template, variables = user_data_parts(resources)
+    assert variables["PublicHost"] == {"Fn::GetAtt": ["Distribution", "DomainName"]}
+    assert "-e KB_PUBLIC_URL=https://VALUE_PUBLICHOST" in render_user_data(resources)

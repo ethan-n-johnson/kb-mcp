@@ -501,7 +501,7 @@ Resources:
         # Inline user data (deviation 2 in docs/PROGRESS.md). Inside Fn::Sub a
         # literal shell brace expression must be written with an exclamation mark
         # after the dollar and open brace; plain $VAR needs no escaping.
-        # The Sub variables are: Bucket (map below), ImageTag, MetricsMode and
+        # The Sub variables are: Bucket and PublicHost (map below), ImageTag, MetricsMode and
         # ExtensionOrigin (parameters), AWS::Region and AWS::StackName (pseudo
         # parameters).
         UserData:
@@ -662,6 +662,7 @@ Resources:
                 -e KB_METRICS_MODE=${MetricsMode} \
                 -e "KB_EXTENSION_ORIGIN=${ExtensionOrigin}" \
                 -e KB_PROXY_HOPS=2 \
+                -e KB_PUBLIC_URL=https://${PublicHost} \
                 "${!LOG_OPTS[@]}" \
                 "$IMAGE"
 
@@ -689,6 +690,9 @@ Resources:
                 exit 1
               fi
             - Bucket: !ImportValue kb-BucketName
+              # The CloudFront domain, so upload links (kb/uploads.py) point where
+              # clients can reach. The ALB itself only accepts CloudFront traffic.
+              PublicHost: !GetAtt Distribution.DomainName
 
   # --------------------------------------------------------- Auto Scaling group
   # Max stays at 1: the vector index lives in process memory and SQLite has a

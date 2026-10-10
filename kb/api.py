@@ -15,6 +15,8 @@ from fastapi import APIRouter, Depends, FastAPI, File, Form, Query, Request, Upl
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from kb import db, service
@@ -24,6 +26,7 @@ from kb.ingest.convert import detect_format
 from kb.ingest.errors import IngestError
 from kb.ratelimit import check_search_rate
 from kb.schemas import (
+    UploadLink,
     AuditResult,
     DeleteResult,
     DocOut,
@@ -148,6 +151,55 @@ def ingest(
         conn, body.url, actor, tags=body.tags, force=body.force, search_state=search
     )
     return _upload_response(result)
+
+
+class UploadLinkRequest(BaseModel):
+    """Body of `POST /api/upload-links`."""
+
+    filename: str = Field(max_length=255)
+    title: str | None = Field(default=None, max_length=500)
+    tags: list[str] = Field(default_factory=list)
+    force: bool = False
+
+
+def public_base_url(request: Request) -> str:
+    """The address clients reach this server at: `KB_PUBLIC_URL`, else the request's own."""
+    return request.app.state.settings.public_url or str(request.base_url).rstrip("/")
+
+
+@router.post("/upload-links", status_code=201, response_model=UploadLink, responses={400: _ERRORS, 401: _ERRORS})
+def create_upload_link(body: UploadLinkRequest, request: Request, actor: str = Writer) -> UploadLink:
+    """A one-time link for sending one whole file (same as the MCP `upload_file` tool)."""
+    return service.create_upload_link(
+        actor, body.filename, public_base_url(request),
+        title=body.title, tags=body.tags, force=body.force,
+    )
+
+
+@router.api_route(
+    "/uploads/{ticket}", methods=["POST", "PUT"], status_code=201,
+    responses={400: _ERRORS, 404: _ERRORS, 409: _ERRORS, 413: _ERRORS, 422: _ERRORS},
+)
+async def upload_with_ticket(ticket: str, request: Request, search: SearchState = Search) -> JSONResponse:
+    """Receive the file for a one-time link: the raw request body is the file.
+
+    No bearer token: the ticket in the path is the permission, valid once and
+    for 15 minutes (`kb/uploads.py`). Same responses as `POST /api/docs/file`,
+    plus 404 `bad_ticket`. `PUT` is accepted too, so `curl -T file URL` works.
+    """
+    data = await request.body()
+    db_path = request.app.state.settings.db_path
+
+    def work() -> JSONResponse:
+        conn = db.connect(db_path)
+        try:
+            return _upload_response(
+                service.upload_with_ticket(conn, ticket, data, search_state=search)
+            )
+        finally:
+            conn.close()
+
+    return await run_in_threadpool(work)
 
 
 @router.get("/docs/{doc_id}", response_model=DocOut, responses={404: _ERRORS})

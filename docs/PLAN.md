@@ -211,13 +211,14 @@ Response shape shared by MCP and REST:
 
 ## Interfaces
 
-The 11 MCP tools and the REST routes map one to one onto `service.py`; write tools check the token before touching the database.
+The 12 MCP tools and the REST routes map one to one onto `service.py`; write tools check the token before touching the database.
 
 | MCP tool | Arguments | Token | REST route | What it does |
 | --- | --- | --- | --- | --- |
 | `search` | `query`, `k=5`, `tags?` | No | `GET /api/search` | Pipeline above; returns mode, confidence, results |
 | `get` | `doc_id` or `chunk_id`, `include_chunks=false` | No | `GET /api/docs/{id}` | Full Markdown plus metadata and tags |
 | `upload` | `title`, `content`, `format`, `tags?`, `force=false` | Yes | `POST /api/docs` | Convert, dedupe, chunk, embed, store |
+| `upload_file` | `filename`, `title?`, `tags?`, `force=false` | Yes | `POST /api/upload-links`, then `POST /api/uploads/{ticket}` | One-time link (15 minutes, one file) the client sends the file's bytes to; on a stdio server `filename` is a local path stored right away (added after phase 11: a PDF does not fit in a tool call) |
 | `update` | `doc_id`, `content?`, `title?`, `tags?`, `format?` | Yes | `PATCH /api/docs/{id}` | Re-chunks and re-embeds only if content changed |
 | `delete` | `doc_id` | Yes | `DELETE /api/docs/{id}` | Removes rows, FTS entries and index vectors |
 | `merge` | `target_id`, `source_ids`, `delete_sources=true` | Yes | `POST /api/docs/merge` | Appends sources as sections of the target, keeps their URLs, re-chunks |

@@ -87,6 +87,23 @@ class UploadResult(BaseModel):
         return self.model_dump(exclude_none=True, exclude_defaults=True)
 
 
+class UploadLink(BaseModel):
+    """A one-time link for sending a whole file (`upload_file` tool, `kb/uploads.py`).
+
+    Send the file's bytes as the request body to `url` with `method` before
+    `expires_in` seconds pass; the response is the same `UploadResult` an upload
+    returns. `curl` is a ready command with a placeholder for the local path.
+    """
+
+    status: Literal["upload_link"] = "upload_link"
+    url: str
+    method: Literal["POST"] = "POST"
+    filename: str
+    expires_in: int
+    curl: str
+    message: str
+
+
 class DeleteResult(BaseModel):
     """Outcome of a delete."""
 

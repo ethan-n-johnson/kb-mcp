@@ -661,10 +661,21 @@ def api_routes() -> list[APIRoute]:
     return list(found.values())
 
 
+TICKET_ROUTES = {"/api/uploads/{ticket}"}
+"""Write routes that take a one-time upload ticket instead of a bearer token."""
+
+
 def test_every_non_get_route_refuses_a_missing_or_wrong_token(open_app: OpenApp) -> None:
     with open_app() as client:
         checked = []
         for route in api_routes():
+            if route.path in TICKET_ROUTES:
+                # The ticket in the path is the permission (kb/uploads.py): no bearer
+                # token, and a made-up ticket is refused before anything is read.
+                for method in sorted(route.methods - {"GET", "HEAD", "OPTIONS"}):
+                    resp = client.request(method, route.path.replace("{ticket}", "guess"), content=b"x")
+                    assert resp.status_code == 404 and resp.json()["error"] == "bad_ticket"
+                continue
             for method in sorted(route.methods - {"GET", "HEAD", "OPTIONS"}):
                 path = route.path.replace("{doc_id}", "1")
                 for headers in ({}, {"Authorization": "Bearer wrong"}, {"Authorization": "Basic dGVzdDp0ZXN0dG9rZW4="}):
@@ -685,7 +696,8 @@ def test_every_non_get_route_refuses_a_missing_or_wrong_token(open_app: OpenApp)
 
 def test_every_mcp_write_tool_refuses_a_missing_or_wrong_token(open_app: OpenApp) -> None:
     arguments = {
-        "upload": {"title": "t", "content": "c"}, "update": {"doc_id": 1, "title": "x"},
+        "upload": {"title": "t", "content": "c"}, "upload_file": {"filename": "a.pdf"},
+        "update": {"doc_id": 1, "title": "x"},
         "delete": {"doc_id": 1}, "merge": {"target_id": 1, "source_ids": [2]},
         "ingest_url": {"url": "https://example.com/"}, "verify": {"doc_id": 1},
     }

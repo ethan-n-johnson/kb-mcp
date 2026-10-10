@@ -42,6 +42,7 @@ class Settings:
     search_timeout: float = 5.0
     rerank_candidates: int = 15
     rerank_max_chars: int = 1000
+    public_url: str | None = None
     extension_origin: str | None = None
     search_rate: str = "30/minute"
     proxy_hops: int = 0
@@ -91,6 +92,7 @@ class Settings:
             search_timeout=_float(e, "KB_SEARCH_TIMEOUT", cls.search_timeout),
             rerank_candidates=rerank_candidates,
             rerank_max_chars=rerank_max_chars,
+            public_url=(e.get("KB_PUBLIC_URL") or "").strip().rstrip("/") or None,
             extension_origin=e.get("KB_EXTENSION_ORIGIN") or None,
             search_rate=(e.get("KB_SEARCH_RATE") or cls.search_rate).strip(),
             proxy_hops=_int(e, "KB_PROXY_HOPS", cls.proxy_hops),

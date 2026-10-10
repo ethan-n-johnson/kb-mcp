@@ -101,7 +101,7 @@ def test_sdk_client_without_a_token_can_read_but_not_write(live_server: str) -> 
 
 
 def test_curl_style_post_to_the_bare_path_is_not_redirected(live_server: str) -> None:
-    """The acceptance check: `POST /mcp` answers 200 itself, with the 11 tools."""
+    """The acceptance check: `POST /mcp` answers 200 itself, with the 12 tools."""
     resp = httpx.post(
         live_server + "/mcp",
         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
@@ -109,7 +109,7 @@ def test_curl_style_post_to_the_bare_path_is_not_redirected(live_server: str) ->
         follow_redirects=False,
     )
     assert resp.status_code == 200
-    assert len(resp.json()["result"]["tools"]) == 11
+    assert len(resp.json()["result"]["tools"]) == 12
 
 
 def test_concurrent_calls_do_not_block_each_other(live_server: str) -> None:

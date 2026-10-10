@@ -190,7 +190,7 @@ def test_stdout_carries_only_protocol_and_logs_go_to_stderr(stdio_db: Path) -> N
     assert all(msg.get("jsonrpc") == "2.0" for msg in decoded)
     by_id = {msg["id"]: msg for msg in decoded if "id" in msg}
     assert set(by_id) == {1, 2, 3, 4}
-    assert len(by_id[2]["result"]["tools"]) == 11
+    assert len(by_id[2]["result"]["tools"]) == 12
     assert by_id[3]["result"]["structuredContent"]["mode"] == "semantic"
     assert by_id[4]["result"]["isError"] is False
     err_lines = [line for line in stderr.splitlines() if line.strip()]

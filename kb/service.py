@@ -3,7 +3,8 @@
 Every interface calls these functions; no business logic lives elsewhere. All
 eleven operations are implemented: `search`, `get`, `upload`, `update`,
 `delete`, `merge`, `ingest_url`, `list_tags`, `verify`, `stale` and `gaps`,
-plus the admin helpers `set_fallback` and `audit` (read-only audit log).
+plus the admin helpers `set_fallback` and `audit` (read-only audit log), and
+the one-time upload links `create_upload_link` and `upload_with_ticket`.
 
 Write operations take the already-authenticated `actor` (the write token's
 name) for the audit log; the token check itself happens in `kb.auth`, before
@@ -40,6 +41,7 @@ from pydantic import ValidationError
 
 from kb import db
 from kb.errors import ServiceError
+from kb import uploads
 from kb.ingest import dedupe, mdmerge, originals
 from kb.ingest.chunk import Chunk, chunk_markdown
 from kb.ingest.convert import detect_format, to_markdown
@@ -61,6 +63,7 @@ from kb.schemas import (
     TagCount,
     TagsResult,
     UpdateResult,
+    UploadLink,
     UploadRequest,
     UploadResult,
     VerifyResult,
@@ -461,6 +464,89 @@ def ingest_url(
         raise ServiceError("bad_source_url", "the final URL is too long to store", 400) from exc
     prepared = prepare_upload(req, file_bytes=fetched.body)
     return _store_new(conn, prepared, force, actor, search_state)
+
+
+# --- upload links (whole files from a chat client) -------------------------------
+
+UPLOAD_EXTENSIONS = (".pdf", ".md", ".markdown", ".txt", ".html", ".htm")
+
+
+def create_upload_link(
+    actor: str,
+    filename: str,
+    base_url: str,
+    *,
+    title: str | None = None,
+    tags: list[str] | None = None,
+    force: bool = False,
+    store: uploads.TicketStore | None = None,
+) -> UploadLink:
+    """Issue a one-time link through which `actor` can send one file (see `kb/uploads.py`).
+
+    `filename` only names the file (its extension picks the format); a path is
+    reduced to its last part. `base_url` is the public address of this server
+    (`KB_PUBLIC_URL`, or the request's own base URL). Raises `ServiceError`
+    `bad_format` for an extension the converter cannot read.
+    """
+    name = originals.safe_filename(filename, "")
+    if not name or not name.lower().endswith(UPLOAD_EXTENSIONS):
+        raise ServiceError(
+            "bad_format", "filename must end in .pdf, .md, .markdown, .txt, .html or .htm", 400
+        )
+    clean_title = (title or "").strip() or None
+    if clean_title is not None and len(clean_title) > 500:
+        raise ServiceError("bad_request", "title must be at most 500 characters", 400)
+    ticket, ttl = (store or uploads.STORE).issue(
+        actor, name, title=clean_title, tags=_normalize_tags(tags or []), force=force
+    )
+    url = f"{base_url.rstrip('/')}/api/uploads/{ticket}"
+    minutes = int(ttl // 60)
+    log.info("upload link issued", extra={"actor": actor, "upload_filename": name})
+    return UploadLink(
+        url=url,
+        filename=name,
+        expires_in=int(ttl),
+        curl=f'curl -sS --data-binary @"<path to {name}>" "{url}"',
+        message=(
+            f"Send the file's bytes as the body of a POST to `url` within {minutes} minutes, for"
+            " example with the `curl` command (replace the placeholder with the local path). The"
+            " link works once. The response is the usual upload result; for `possible_duplicate`"
+            " ask for a new link with force=true if the user wants it saved anyway."
+        ),
+    )
+
+
+def upload_with_ticket(
+    conn: Conn,
+    ticket: str,
+    data: bytes,
+    *,
+    search_state: SearchState | None = None,
+    store: uploads.TicketStore | None = None,
+) -> UploadResult:
+    """Store `data` as the file a ticket was issued for, as the ticket's owner.
+
+    The ticket is used up even if the file then fails to convert. Raises
+    `ServiceError` `bad_ticket` (404) for an unknown, used or expired ticket and
+    `bad_request` for an empty body; conversion errors are `IngestError`.
+    """
+    issued = (store or uploads.STORE).take(ticket)
+    if issued is None:
+        raise ServiceError(
+            "bad_ticket", "this upload link is unknown, already used or expired; ask for a new one", 404
+        )
+    if not data:
+        raise ServiceError("bad_request", "the request body is empty; send the file's bytes", 400)
+    req = UploadRequest(
+        title=issued.title,
+        content="",
+        format=detect_format(filename=issued.filename),
+        tags=list(issued.tags),
+        force=issued.force,
+    )
+    return upload(
+        conn, req, issued.actor, filename=issued.filename, file_bytes=data, search_state=search_state
+    )
 
 
 # --- get and delete ---------------------------------------------------------------

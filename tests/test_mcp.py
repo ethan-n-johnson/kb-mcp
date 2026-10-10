@@ -27,12 +27,13 @@ from tests.ops_helpers import EBS_EDITED, add_gap, audit_rows, backdate, rows, s
 
 PLAN = Path(__file__).parent.parent / "docs" / "PLAN.md"
 
-WRITE_TOOLS = ["upload", "update", "delete", "merge", "ingest_url", "verify"]
+WRITE_TOOLS = ["upload", "upload_file", "update", "delete", "merge", "ingest_url", "verify"]
 READ_TOOLS = ["search", "get", "list_tags", "stale", "gaps"]
 
 # Calls that would change something if the token check let them through.
 WRITE_CALLS: dict[str, dict[str, Any]] = {
     "upload": {"title": "Note", "content": "# Note\n\nsome text that is long enough to chunk"},
+    "upload_file": {"filename": "guide.pdf"},
     "update": {"doc_id": 1, "title": "Renamed"},
     "delete": {"doc_id": 1},
     "merge": {"target_id": 1, "source_ids": [2]},
@@ -84,9 +85,9 @@ def listed_tools(client: TestClient) -> dict[str, dict[str, Any]]:
     return {t["name"]: t for t in resp.json()["result"]["tools"]}
 
 
-def test_the_plan_table_parses_to_eleven_tools() -> None:
+def test_the_plan_table_parses_to_twelve_tools() -> None:
     table = plan_table()
-    assert len(table) == 11
+    assert len(table) == 12
     assert table["search"] == ({"query", "k", "tags"}, {"k": 5}, {"tags"})
     assert table["get"][0] == {"doc_id", "chunk_id", "include_chunks"}
     assert table["list_tags"][0] == set()
