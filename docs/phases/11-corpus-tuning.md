@@ -21,7 +21,7 @@ About 60 real documents across all input formats, the planted demo cases, an ide
    **Verify every URL** returns 200 and converts to sensible chunks before committing the manifest. Replace dead links; never guess.
 2. Extend `clean_markdown` for what the real corpus shows. FastAPI docs contain mkdocs syntax such as `{* ../../docs_src/... *}` include lines and `/// tip` admonition fences; drop the include lines and turn admonitions into plain paragraphs. Add a test per new rule.
 3. Planted cases:
-   - `seeds/planted/ec2-near-duplicate.md`: a lightly edited copy (reworded intro, one paragraph removed) of one seeded EC2 page. **Not ingested by `seed`**; it is uploaded live in demo step 4.
+   - `seeds/planted/fastapi-near-duplicate.md`: a lightly edited copy (reworded intro, one paragraph removed) of the seeded FastAPI "Handling Errors" page (was an EC2 page; see Deviations in PROGRESS.md). **Not ingested by `seed`**; it is uploaded live in demo step 4.
    - `planted.stale`: 3 seeded URLs whose `verified_at` and `updated_at` the seeder backdates by 200 days.
 4. `python -m kb.cli seed seeds/seeds.yaml`: ingests each entry through `service.upload` / `service.ingest_url` with actor `cli`; skips entries whose `source_url` already exists or whose content hash matches (idempotent); applies the stale backdating; prints a summary table (added, skipped, failed with reason). One failing URL must not stop the run.
 5. Make sure `seeds/` is copied into the image (phase 03 left a placeholder).
@@ -33,7 +33,7 @@ About 60 real documents across all input formats, the planted demo cases, an ide
    - `KB_CONF_HIGH` / `KB_CONF_LOW` so out-of-corpus questions are `low` and most answerable ones are `high`.
    - `KB_DUP_THRESHOLD` between the highest distinct-doc similarity and the planted duplicate's similarity.
    Update the defaults in `kb/config.py`, record the values and the eval summary in `docs/PROGRESS.md`.
-10. Seed on AWS: push the image, deploy, then run `docker exec kb python -m kb.cli seed seeds/seeds.yaml` on the instance via `aws ssm send-command` (or Session Manager). Run it twice to prove idempotency.
+10. Seed on AWS. The sandbox instances have no SSM (deviation 8), so seed on the laptop into `.localdata/seed/kb.db` (run it twice to prove idempotency), upload it with `python -m kb.cli snapshot-push`, then deploy so the replacement instance restores it at boot. Steps in `docs/SETUP.md`, "Seed the demo corpus".
 
 ## Do not
 
@@ -42,8 +42,8 @@ About 60 real documents across all input formats, the planted demo cases, an ide
 
 ## Acceptance
 
-- [ ] Seed run on AWS adds about 60 docs; the second run adds 0.
+- [ ] Seed run adds about 60 docs; the second run adds 0; the deployed instance serves them after restoring the snapshot.
 - [ ] Eval: hit@5 at least 90% on answerable questions; all 3 out-of-corpus questions are `low`; both demo questions are `high` with the right doc at rank 1.
 - [ ] `GET /api/stale` returns the 3 planted docs.
-- [ ] Uploading `seeds/planted/ec2-near-duplicate.md` (dry run or against a local copy) returns `possible_duplicate` with the original as top candidate.
+- [ ] Uploading `seeds/planted/fastapi-near-duplicate.md` (dry run or against a local copy) returns `possible_duplicate` with the original as top candidate.
 - [ ] Tuned values recorded in PROGRESS.md; phase log updated; commit `phase 11: seed corpus and tuning`.

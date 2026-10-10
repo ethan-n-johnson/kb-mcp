@@ -35,10 +35,10 @@ class Settings:
     tokens_key: str = "config/write-tokens"
     aws_region: str = "us-east-1"
     conf_high: float = 0.70
-    conf_low: float = 0.30
+    conf_low: float = 0.02
     cosine_conf_high: float = 0.75
     cosine_conf_low: float = 0.55
-    dup_threshold: float = 0.92
+    dup_threshold: float = 0.96
     search_timeout: float = 3.0
     extension_origin: str | None = None
     search_rate: str = "30/minute"

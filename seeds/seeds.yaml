@@ -1,0 +1,127 @@
+# Demo corpus for kb-mcp (phase 11). Read by `python -m kb.cli seed seeds/seeds.yaml`.
+#
+# Each entry has exactly one of `url` (fetched like ingest_url) or `path` (a file
+# relative to this manifest), plus optional `tags`, `title` and `format`.
+# Entry tags are added to the section tags. URLs only: no downloaded corpus
+# content is committed (docs/phases/11-corpus-tuning.md, "Do not").
+#
+# Check every entry without writing anything:
+#   python -m kb.cli seed seeds/seeds.yaml --dry-run
+#
+# Not ingested here: seeds/planted/fastapi-near-duplicate.md, a lightly edited
+# copy of the FastAPI "Handling Errors" page. It is uploaded live in demo step 4
+# to show the near-duplicate warning.
+
+delay_seconds: 0.5
+
+sections:
+  # --- AWS user guides for the services in this design (HTML) -------------------
+  - tags: [aws, ec2]
+    entries:
+      - url: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html
+      - url: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-lifecycle.html
+      - url: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-security-groups.html
+      - url: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/user-data.html
+      - url: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/iam-roles-for-amazon-ec2.html
+      - url: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html
+      - url: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/elastic-ip-addresses-eip.html
+  - tags: [aws, ebs]
+    entries:
+      - url: https://docs.aws.amazon.com/ebs/latest/userguide/ebs-attaching-volume.html
+      - url: https://docs.aws.amazon.com/ebs/latest/userguide/ebs-using-volumes.html
+  - tags: [aws, vpc]
+    entries:
+      - url: https://docs.aws.amazon.com/vpc/latest/userguide/how-it-works.html
+      - url: https://docs.aws.amazon.com/vpc/latest/userguide/configure-subnets.html
+      - url: https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html
+      - url: https://docs.aws.amazon.com/vpc/latest/userguide/vpc-network-acls.html
+      - url: https://docs.aws.amazon.com/vpc/latest/privatelink/vpc-endpoints-s3.html
+  - tags: [aws, autoscaling]
+    entries:
+      - url: https://docs.aws.amazon.com/autoscaling/ec2/userguide/what-is-amazon-ec2-auto-scaling.html
+      # Demo question 1: how an Auto Scaling group replaces an unhealthy instance.
+      - url: https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-health-checks.html
+      - url: https://docs.aws.amazon.com/autoscaling/ec2/userguide/replace-unhealthy-instance.html
+      - url: https://docs.aws.amazon.com/autoscaling/ec2/userguide/health-check-grace-period.html
+      - url: https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-lifecycle.html
+      - url: https://docs.aws.amazon.com/autoscaling/ec2/userguide/launch-templates.html
+  - tags: [aws, elb]
+    entries:
+      - url: https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html
+      - url: https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html
+      - url: https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-listeners.html
+  - tags: [aws, efs]
+    entries:
+      - url: https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html
+      # Demo question 2: how to mount EFS on Amazon Linux.
+      - url: https://docs.aws.amazon.com/efs/latest/ug/mounting-fs-mount-helper-ec2-linux.html
+      - url: https://docs.aws.amazon.com/efs/latest/ug/efs-mount-helper.html
+  - tags: [aws, s3]
+    entries:
+      - url: https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html
+      - url: https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html
+      - url: https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lifecycle-mgmt.html
+      - url: https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html
+  - tags: [aws, cloudfront]
+    entries:
+      - url: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Introduction.html
+      - url: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/restrict-access-to-load-balancer.html
+  - tags: [aws, cloudformation]
+    entries:
+      - url: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html
+      - url: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-updating-stacks-changesets.html
+  - tags: [aws, cloudwatch]
+    entries:
+      - url: https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/AlarmThatSendsEmail.html
+
+  # --- AWS whitepaper (PDF) --------------------------------------------------------
+  - tags: [aws, well-architected, whitepaper]
+    entries:
+      - url: https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/wellarchitected-reliability-pillar.pdf
+
+  # --- FastAPI docs from GitHub (Markdown), pinned to one commit ----------------
+  - tags: [fastapi, python]
+    base_url: https://raw.githubusercontent.com/fastapi/fastapi/f5c6e9b4f9cadc1bf0f9a1fd672e621206b63007/docs/en/docs/
+    entries:
+      - url: tutorial/first-steps.md
+      - url: tutorial/path-params.md
+      - url: tutorial/query-params.md
+      - url: tutorial/body.md
+      - url: tutorial/response-model.md
+      # Original of the planted near-duplicate.
+      - url: tutorial/handling-errors.md
+      - url: tutorial/dependencies/index.md
+      - url: tutorial/dependencies/dependencies-with-yield.md
+      - url: tutorial/security/first-steps.md
+      - url: tutorial/security/oauth2-jwt.md
+      - url: tutorial/middleware.md
+      - url: tutorial/cors.md
+      - url: tutorial/sql-databases.md
+      - url: tutorial/bigger-applications.md
+      - url: tutorial/background-tasks.md
+      - url: tutorial/request-files.md
+      - url: tutorial/testing.md
+      - url: tutorial/debugging.md
+      - url: deployment/docker.md
+      - url: deployment/concepts.md
+      - url: deployment/server-workers.md
+      - url: deployment/https.md
+
+  # --- MCP specification (HTML) ----------------------------------------------------
+  - tags: [mcp]
+    base_url: https://modelcontextprotocol.io/specification/2025-11-25/
+    entries:
+      - url: basic/lifecycle
+      - url: basic/transports
+      - url: basic/authorization
+      - url: server/tools
+      - url: server/resources
+
+# Planted stale docs: after seeding, these entries get `verified_at` and
+# `updated_at` set this many days in the past, so `stale` has something to show.
+planted:
+  stale_days: 200
+  stale:
+    - https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html
+    - https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Introduction.html
+    - https://raw.githubusercontent.com/fastapi/fastapi/f5c6e9b4f9cadc1bf0f9a1fd672e621206b63007/docs/en/docs/tutorial/debugging.md

@@ -235,6 +235,77 @@ When any AWS command later fails with `ExpiredToken` or `InvalidClientTokenId`, 
 
 ---
 
+## Seed the demo corpus (phase 11)
+
+The instances have no shell access in the sandbox (`myS3Role` allows S3 only, so there is no Session Manager or `ssm send-command`). So the corpus is seeded **on the laptop** into a local database, and that database goes to S3 as the snapshot every new instance restores at boot. The laptop uses the same embedding and reranking models as the image (same model names, downloaded once into `.localdata/models`), so the stored vectors match what the server would have made.
+
+Do this once (it only needs repeating if the manifest changes). Lab credentials must be current (`aws sts get-caller-identity`). Run from `kb-mcp`, one command at a time:
+
+1. Set up the shell:
+
+   ```bash
+   source .venv/bin/activate
+   export KB_DB="$PWD/.localdata/seed/kb.db" KB_MODEL_DIR="$PWD/.localdata/models"
+   BUCKET=$(aws cloudformation list-exports --region us-east-1 \
+     --query "Exports[?Name=='kb-BucketName'].Value" --output text); echo "$BUCKET"
+   ```
+
+2. Check every manifest entry without writing anything. Each line says `ok` with its chunk count and title, or `failed` with the reason:
+
+   ```bash
+   python -m kb.cli seed seeds/seeds.yaml --dry-run
+   ```
+
+   Fix or replace any `failed` URL in `seeds/seeds.yaml` (never guess a URL; open it in a browser first), then run the dry run again until the summary has no failures.
+
+3. Seed for real. With `KB_BUCKET` set, the HTML and PDF originals also go to the bucket, like any upload. The first run downloads the two models (about 200 MB) and takes a few minutes:
+
+   ```bash
+   KB_BUCKET="$BUCKET" python -m kb.cli seed seeds/seeds.yaml
+   ```
+
+   The summary should read about 60 `added` and 3 `stale`. Run the same command again: it must say `0 added` (everything `skipped`).
+
+4. Measure search quality (runs on a temporary copy, so the real database is untouched). Paste the whole output to Claude to tune `KB_CONF_HIGH`, `KB_CONF_LOW` and `KB_DUP_THRESHOLD`:
+
+   ```bash
+   python -m kb.cli eval tests/eval/questions.yaml
+   ```
+
+   To see why a question ranks the way it does, `python -m kb.cli search "question one" "question two"` prints the top 5 hits of each with score, heading path and snippet (also on a temporary copy, so it records no gaps).
+
+5. Upload the seeded database as the boot snapshot:
+
+   ```bash
+   KB_BUCKET="$BUCKET" python -m kb.cli snapshot-push
+   ```
+
+   From now until step 6 finishes, **do not use the running site** (no searches, no uploads): any write on the old instance uploads its own database over this snapshot. Bucket versioning keeps the previous versions if that happens; just run this step again.
+
+6. Commit, then deploy. The new commit builds a new image, the Auto Scaling group replaces the instance, and the replacement restores the seeded snapshot (about 15 to 20 minutes):
+
+   ```bash
+   git add -A && git commit -m "phase 11: seed corpus and tuning"
+   infra/up.sh
+   ```
+
+   If nothing changed in the code (no new image), replace the instance by hand instead: `aws autoscaling set-instance-health --instance-id <id> --health-status Unhealthy` (the instance ID is in the EC2 console, or `aws autoscaling describe-auto-scaling-instances --query 'AutoScalingInstances[].InstanceId' --output text`).
+
+7. Check the deployed knowledge base, then save it:
+
+   ```bash
+   CF=$(aws cloudformation describe-stacks --stack-name kb-app --region us-east-1 \
+     --query "Stacks[0].Outputs[?OutputKey=='DistributionDomainName'].OutputValue" --output text)
+   curl -s "https://$CF/healthz"; echo
+   curl -s "https://$CF/api/stale" | python -m json.tool | grep -c '"doc_id"'   # 3
+   curl -s "https://$CF/api/search?q=how+does+an+Auto+Scaling+group+replace+an+unhealthy+instance" | python -m json.tool | head -20
+   infra/up.sh save
+   ```
+
+   `/healthz` shows the chunk count; the search should be `semantic` and `high`. `up.sh save` keeps the seeded database on the laptop, so a sandbox reset no longer means seeding again.
+
+---
+
 ## Deploy flow (what the phases run)
 
 `infra/up.sh` (above) runs all of this in order and skips what exists. The steps below are what it does, for running one piece by hand. Run from `kb-mcp` in a bash shell (Linux, or the Ubuntu terminal on Windows). Run the commands **one at a time** and check each one finished without an error before the next; pasting the whole block keeps going after a failure.
@@ -307,6 +378,8 @@ To save sandbox credit between sessions, delete only the app stack with `infra/t
 | `You are not authorized to use launch template` | The lab user may not pass that instance profile (`iam:PassRole`). Use `myS3Role` (the default) |
 | `put_metric_data failed, will retry` warnings in the container log | Expected in the sandbox: `myS3Role` cannot publish metrics. Searches are not affected |
 | Boot log shows `PermissionError: [Errno 13] Permission denied: '/app/kb/__init__.py'` | The image was built from owner-only files (fixed in the Dockerfile on 2026-10-09). Rebuild with `infra/push-image.sh --build`; optionally also run `chmod -R go+rX .` in the repo |
+| `seed` lines say `fetch_failed: HTTP 404` | The page moved: find its new URL in a browser, update `seeds/seeds.yaml`, rerun the dry run |
+| `seed` or `eval` loads no models (`keyword only`) | `KB_MODEL_DIR` points somewhere unwritable (the default `/models` exists only in the image): `export KB_MODEL_DIR="$PWD/.localdata/models"` |
 | `syntax error near unexpected token 'newline'` | A placeholder like `<tag>` was typed literally: use the real tag, or `"$TAG"` |
 | `$'\r': command not found` running a script | Windows line endings: `git config --global core.autocrlf input`, then re-clone inside WSL |
 

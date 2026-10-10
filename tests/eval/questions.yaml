@@ -1,0 +1,89 @@
+# Evaluation set for tuning (phase 11). Run with:
+#   python -m kb.cli eval tests/eval/questions.yaml
+#
+# kind: answerable (shares words with the answer), paraphrase (no shared
+# keywords), outside (not in the corpus, must come back `low`).
+# expect: the source_url of the document that answers the question, exactly as
+# written in seeds/seeds.yaml. demo: the question is asked live in the demo, so
+# it must be `high` with that document at rank 1.
+#
+# HUMAN: review and edit this list before tuning.
+
+questions:
+  # --- answerable ------------------------------------------------------------------
+  # Three Auto Scaling pages each state the answer in their first chunk ("it
+  # replaces it with a new instance"), and their scores tie to 4 decimals, so
+  # any of them counts as the right hit.
+  - q: how does an Auto Scaling group replace an unhealthy instance
+    kind: answerable
+    expect:
+      - https://docs.aws.amazon.com/autoscaling/ec2/userguide/health-check-grace-period.html
+      - https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-health-checks.html
+      - https://docs.aws.amazon.com/autoscaling/ec2/userguide/replace-unhealthy-instance.html
+    demo: true
+  - q: how do I mount EFS on Amazon Linux
+    kind: answerable
+    expect: https://docs.aws.amazon.com/efs/latest/ug/mounting-fs-mount-helper-ec2-linux.html
+    demo: true
+  - q: how do I attach an EBS volume to an EC2 instance
+    kind: answerable
+    expect: https://docs.aws.amazon.com/ebs/latest/userguide/ebs-attaching-volume.html
+  - q: what is the health check grace period for an Auto Scaling group
+    kind: answerable
+    expect: https://docs.aws.amazon.com/autoscaling/ec2/userguide/health-check-grace-period.html
+  - q: how do I require IMDSv2 for instance metadata
+    kind: answerable
+    expect: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html
+  - q: how do NAT gateways let private subnets reach the internet
+    kind: answerable
+    expect: https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html
+  - q: how do I configure health checks for an Application Load Balancer target group
+    kind: answerable
+    expect: https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html
+  - q: how do I enable versioning on an S3 bucket
+    kind: answerable
+    expect: https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html
+  - q: how do I restrict access to an Application Load Balancer so only CloudFront can reach it
+    kind: answerable
+    expect: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/restrict-access-to-load-balancer.html
+  - q: how do I preview CloudFormation stack changes with a change set
+    kind: answerable
+    expect: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-updating-stacks-changesets.html
+  - q: how do I raise an HTTPException in FastAPI
+    kind: answerable
+    expect: https://raw.githubusercontent.com/fastapi/fastapi/f5c6e9b4f9cadc1bf0f9a1fd672e621206b63007/docs/en/docs/tutorial/handling-errors.md
+  - q: how do I enable CORS in FastAPI with CORSMiddleware
+    kind: answerable
+    expect: https://raw.githubusercontent.com/fastapi/fastapi/f5c6e9b4f9cadc1bf0f9a1fd672e621206b63007/docs/en/docs/tutorial/cors.md
+  - q: what is the Streamable HTTP transport in MCP
+    kind: answerable
+    expect: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports
+  - q: how does an MCP server expose tools to clients
+    kind: answerable
+    expect: https://modelcontextprotocol.io/specification/2025-11-25/server/tools
+
+  # --- paraphrased (no shared keywords with the answer) ------------------------------
+  - q: my web server died, will the fleet bring up a fresh one by itself
+    kind: paraphrase
+    expect:
+      - https://docs.aws.amazon.com/autoscaling/ec2/userguide/health-check-grace-period.html
+      - https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-health-checks.html
+      - https://docs.aws.amazon.com/autoscaling/ec2/userguide/replace-unhealthy-instance.html
+  - q: keep older copies of files around after someone overwrites them
+    kind: paraphrase
+    expect: https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html
+  - q: run a script automatically the first time a virtual machine boots
+    kind: paraphrase
+    expect: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/user-data.html
+
+  # --- outside the corpus (must be low) --------------------------------------------
+  - q: what is a good recipe for sourdough bread
+    kind: outside
+  - q: who won the 2018 FIFA World Cup
+    kind: outside
+  - q: how do I train a convolutional neural network in PyTorch
+    kind: outside
+
+near_duplicate:
+  path: ../../seeds/planted/fastapi-near-duplicate.md
+  original: https://raw.githubusercontent.com/fastapi/fastapi/f5c6e9b4f9cadc1bf0f9a1fd672e621206b63007/docs/en/docs/tutorial/handling-errors.md

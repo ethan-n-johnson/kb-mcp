@@ -245,3 +245,33 @@ def test_unknown_format_is_rejected() -> None:
     with pytest.raises(IngestError) as err:
         to_markdown("x", "docx")
     assert err.value.code == "bad_format"
+
+
+# --- mkdocs syntax from the FastAPI docs (phase 11) -----------------------------------
+
+
+def test_mkdocs_include_lines_are_dropped() -> None:
+    md = "# T\n\nIntro text.\n\n{* ../../docs_src/first_steps/tutorial001_py310.py hl[1] *}\n\nMore text.\n"
+    assert "docs_src" not in clean_markdown(md)
+    assert "Intro text.\n\nMore text." in clean_markdown(md)
+
+
+def test_heading_anchors_are_stripped() -> None:
+    out = clean_markdown("# Handling Errors { #handling-errors }\n\n## Use `HTTPException` { #use-httpexception }\n")
+    assert out == "# Handling Errors\n\n## Use `HTTPException`"
+    assert to_markdown("# First Steps { #first-steps }\n\nBody text here.\n", "markdown").title == "First Steps"
+
+
+def test_admonitions_become_labelled_paragraphs() -> None:
+    md = "/// tip\n\nUse a dict.\n\n///\n\n/// note | Technical Details\n\nStarlette does it.\n\n///\n"
+    assert clean_markdown(md) == "**Tip:**\n\nUse a dict.\n\n**Technical Details:**\n\nStarlette does it."
+
+
+def test_tab_markers_and_four_slash_fences_are_dropped() -> None:
+    md = "//// tab | Python 3.10+\n\nUse Annotated.\n\n////\n"
+    assert clean_markdown(md) == "Use Annotated."
+
+
+def test_mkdocs_syntax_inside_code_fences_is_left_alone() -> None:
+    md = "```text\n/// tip\n{* a.py *}\n## x { #y }\n```\n"
+    assert clean_markdown(md) == md.strip()

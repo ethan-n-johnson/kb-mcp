@@ -97,7 +97,9 @@ def open_app(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> OpenApp:
     The near-duplicate cutoff is set explicitly to 1.5 (above any cosine, so
     the check never fires) because the fake embedder's similarities say nothing
     about bge's and many tests upload similar generated documents. Tests of the
-    check itself pass `KB_DUP_THRESHOLD=<value>`.
+    check itself pass `KB_DUP_THRESHOLD=<value>`. The confidence cutoffs are
+    pinned to 0.70 and 0.30 for the same reason (pass `KB_CONF_HIGH` or
+    `KB_CONF_LOW` to override).
     """
     monkeypatch.setenv("KB_DB", str(db_path))
     monkeypatch.setenv("KB_WRITE_TOKENS", "test:testtoken")
@@ -118,6 +120,11 @@ def open_app(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> OpenApp:
 
         monkeypatch.setenv("KB_MODELS", "on" if models else "off")
         monkeypatch.setenv("KB_DUP_THRESHOLD", "1.5")
+        # The fake reranker's scores say nothing about the real one's either, so the
+        # confidence cutoffs the tests were written against are pinned here; the
+        # defaults in kb/config.py are tuned for the real models (phase 11).
+        monkeypatch.setenv("KB_CONF_HIGH", "0.70")
+        monkeypatch.setenv("KB_CONF_LOW", "0.30")
         for name, value in env.items():
             monkeypatch.setenv(name, str(value))
         app = create_app(

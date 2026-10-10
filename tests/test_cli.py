@@ -188,3 +188,40 @@ def test_check_models_with_real_models(capsys: pytest.CaptureFixture[str]) -> No
     """Needs the real ONNX models in KB_MODEL_DIR (run with `pytest -m models`)."""
     assert cli.main(["check-models"]) == 0
     assert "OK" in capsys.readouterr().out
+
+
+def test_snapshot_push_uploads_the_database_as_the_boot_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import gzip
+
+    import boto3
+    from moto import mock_aws
+
+    from kb import db
+
+    path = tmp_path / "kb.db"
+    conn = db.connect(path)
+    db.init_schema(conn)
+    conn.close()
+    monkeypatch.setenv("KB_DB", str(path))
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="kb-push")
+        monkeypatch.setenv("KB_BUCKET", "kb-push")
+        assert cli.main(["snapshot-push"]) == 0
+        body = s3.get_object(Bucket="kb-push", Key="snapshots/kb-latest.db.gz")["Body"].read()
+    assert gzip.decompress(body).startswith(b"SQLite format 3")
+    out = capsys.readouterr().out
+    assert "uploaded: s3://kb-push/snapshots/kb-latest.db.gz" in out and "docs:     0" in out
+
+
+def test_snapshot_push_needs_a_bucket_and_a_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("KB_DB", str(tmp_path / "none.db"))
+    assert cli.main(["snapshot-push"]) == 1
+    assert "KB_BUCKET is not set" in capsys.readouterr().err
+    monkeypatch.setenv("KB_BUCKET", "kb-push")
+    assert cli.main(["snapshot-push"]) == 1
+    assert "does not exist" in capsys.readouterr().err

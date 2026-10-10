@@ -43,6 +43,13 @@ _DECORATION_RE = re.compile(r"^[\s#>*_\-+`]+|[\s*_`]+$")
 _FRONT_MATTER_RE = re.compile(r"\A﻿?---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
 _H1_RE = re.compile(r"^ {0,3}#[ \t]+(.+?)[ \t]*#*[ \t]*$")
 
+# mkdocs syntax found in the FastAPI docs (phase 11): `{* ../../docs_src/x.py hl[1] *}`
+# include lines, heading anchors `## Title { #title }`, and `/// tip` or
+# `//// tab | Python 3.10+` admonition fences closed by a line of slashes.
+_MKDOCS_INCLUDE_RE = re.compile(r"^\s*\{\*.*\*\}\s*$")
+_HEADING_ANCHOR_RE = re.compile(r"^( {0,3}#{1,6}[ \t]+.*?)[ \t]*\{[ \t]*#[\w.:-]+[ \t]*\}[ \t]*$")
+_ADMONITION_RE = re.compile(r"^ {0,3}/{3,}(?:[ \t]*([A-Za-z][\w-]*)(?:[ \t]*\|[ \t]*(.*?))?)?[ \t]*$")
+
 _EXT_FORMATS: dict[str, Format] = {
     ".html": "html",
     ".htm": "html",
@@ -120,12 +127,29 @@ def _decorated_text(line: str) -> str:
     return _DECORATION_RE.sub("", _LINK_RE.sub(r"\1", line.strip()))
 
 
+def _admonition_line(line: str) -> str | None:
+    """Replacement for an mkdocs admonition fence line, or None if `line` is not one.
+
+    A closing fence (only slashes) and a tab marker become an empty string (the
+    line is dropped). An opening fence becomes a bold label, the title when it
+    has one (`/// note | Technical Details`), else the type (`/// tip`).
+    """
+    match = _ADMONITION_RE.match(line)
+    if match is None:
+        return None
+    kind, title = match.group(1), (match.group(2) or "").strip()
+    if kind is None or kind.lower() == "tab":
+        return ""
+    return f"**{title or kind.capitalize()}:**"
+
+
 def clean_markdown(md: str) -> str:
     """Strip boilerplate and tidy whitespace.
 
     Drops empty headings and lines matching `BOILERPLATE_PATTERNS`, trims
-    trailing spaces and collapses runs of blank lines to one. Fenced code blocks
-    are left untouched.
+    trailing spaces and collapses runs of blank lines to one. mkdocs syntax
+    (include lines, heading anchors, admonition fences) is removed or turned
+    into plain text. Fenced code blocks are left untouched.
     """
     out: list[str] = []
     fence: str | None = None
@@ -140,7 +164,16 @@ def clean_markdown(md: str) -> str:
             fence = match.group(1)
             out.append(raw.rstrip())
             continue
-        line = _HEADING_EMPHASIS_RE.sub(r"\1\3", raw.rstrip())
+        line = raw.rstrip()
+        if _MKDOCS_INCLUDE_RE.match(line):
+            continue
+        admonition = _admonition_line(line)
+        if admonition is not None:
+            if not admonition:
+                continue
+            line = admonition
+        line = _HEADING_ANCHOR_RE.sub(r"\1", line)
+        line = _HEADING_EMPHASIS_RE.sub(r"\1\3", line)
         if _EMPTY_HEADING_RE.match(line):
             continue
         decorated = _decorated_text(line)

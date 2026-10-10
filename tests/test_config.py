@@ -34,7 +34,7 @@ def test_defaults() -> None:
     assert s.tokens_param == "/kb/write-tokens"
     assert (s.tokens_source, s.tokens_key) == ("ssm", "config/write-tokens")
     assert s.aws_region == "us-east-1"
-    assert (s.conf_high, s.conf_low, s.dup_threshold, s.search_timeout) == (0.70, 0.30, 0.92, 3.0)
+    assert (s.conf_high, s.conf_low, s.dup_threshold, s.search_timeout) == (0.70, 0.02, 0.96, 3.0)
     assert s.extension_origin is None
 
 

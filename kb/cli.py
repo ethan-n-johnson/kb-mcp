@@ -1,6 +1,6 @@
 """Command line entry point: `python -m kb.cli <command>`.
 
-Commands are argparse subcommands so later phases can add `seed` and `eval`.
+Commands are argparse subcommands; `seed`, `eval` and `snapshot-push` came in phase 11.
 Heavy imports (fastembed, trafilatura, pymupdf, boto3) happen inside the
 command functions so `--help` stays fast.
 """
@@ -12,7 +12,11 @@ import math
 import re
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
+
+if TYPE_CHECKING:
+    from kb.config import Settings
+    from kb.search.state import SearchState
 
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 RERANK_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
@@ -245,6 +249,143 @@ def cmd_restore(args: argparse.Namespace) -> int:
     return 0
 
 
+def _open_state(settings: "Settings", *, models: bool) -> "SearchState | None":
+    """Build and start a `SearchState` (models loaded, index built), or None without models."""
+    import asyncio
+
+    from kb.search import indexing
+
+    if not models or not settings.models_on:
+        return None
+    state = indexing.build_state(settings)
+    asyncio.run(indexing.start(state))
+    return state
+
+
+def cmd_seed(args: argparse.Namespace) -> int:
+    """Seed `KB_DB` from a manifest (`seeds/seeds.yaml`) and print one line per entry.
+
+    Exits 1 when any entry failed (every other entry is still processed), 2 for
+    a bad manifest. `--dry-run` fetches and converts each entry without writing.
+    """
+    from kb import db, seed
+    from kb.config import get_settings
+
+    try:
+        manifest = seed.load_manifest(args.manifest)
+    except seed.ManifestError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    settings = get_settings()
+    db_path = Path(settings.db_path)
+    if args.dry_run:
+        print(f"dry run: {len(manifest.entries)} entries, nothing is written")
+        state = None
+    else:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"database: {db_path}")
+        conn = db.connect(db_path)
+        try:
+            db.init_schema(conn)
+        finally:
+            conn.close()
+        state = _open_state(settings, models=True)
+        if state is None:
+            print("models off: chunks are stored without vectors (the server backfills them)")
+        elif not state.semantic_ready():
+            print("warning: the models did not load; chunks are stored without vectors")
+
+    def show(outcome: "seed.Outcome") -> None:
+        doc = "" if outcome.doc_id is None else f" doc {outcome.doc_id}"
+        print(f"{outcome.status:<7}{doc:>9}  {outcome.label}", flush=True)
+        if outcome.detail:
+            print(f"{'':>18}{outcome.detail}", flush=True)
+
+    conn = db.connect(":memory:" if args.dry_run else db_path)
+    try:
+        outcomes = seed.seed(conn, manifest, search_state=state, dry_run=args.dry_run, progress=show)
+    finally:
+        conn.close()
+    counts = seed.summary(outcomes)
+    print("summary: " + ", ".join(f"{n} {status}" for status, n in sorted(counts.items())))
+    if not args.dry_run:
+        conn = db.connect(db_path)
+        try:
+            docs = int(conn.execute("SELECT count(*) FROM docs").fetchone()[0])
+        finally:
+            conn.close()
+        print(f"documents in the database: {docs}")
+    return 1 if counts.get("failed") else 0
+
+
+def cmd_eval(args: argparse.Namespace) -> int:
+    """Run the evaluation questions against `KB_DB` and print the tuning report.
+
+    Exits 1 when an acceptance check of phase 11 fails, 2 for a bad questions
+    file or when the models cannot load.
+    """
+    from kb import evaluate
+    from kb.config import get_settings
+
+    try:
+        qset = evaluate.load_questions(args.questions)
+    except evaluate.QuestionsError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        report = evaluate.evaluate(
+            get_settings(),
+            qset.questions,
+            planted=None if args.no_duplicate else qset.planted,
+            planted_original=qset.planted_original,
+        )
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(evaluate.render(report))
+    return 1 if report.failures() else 0
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    """Show the top hits for one or more queries against a temporary copy of `KB_DB`."""
+    from kb import evaluate
+    from kb.config import get_settings
+
+    try:
+        print(evaluate.inspect(get_settings(), args.queries, args.k))
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def cmd_snapshot_push(args: argparse.Namespace) -> int:
+    """Upload `KB_DB` as the snapshot the instances restore at boot.
+
+    Uses the same copy, integrity check and gzip as the app's own snapshots.
+    Needs `KB_BUCKET` and AWS credentials allowed to write to the bucket.
+    """
+    from kb.backup import SNAPSHOT_KEY, BackupError, create_snapshot
+    from kb.config import get_settings
+
+    settings = get_settings()
+    if not settings.bucket:
+        print("error: KB_BUCKET is not set", file=sys.stderr)
+        return 1
+    if not Path(settings.db_path).is_file():
+        print(f"error: database {settings.db_path} does not exist", file=sys.stderr)
+        return 1
+    try:
+        result = create_snapshot(settings.db_path, settings.bucket, region=settings.aws_region)
+    except BackupError as exc:
+        print(f"error: snapshot upload failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"uploaded: s3://{settings.bucket}/{SNAPSHOT_KEY}")
+    print(f"docs:     {result.docs}")
+    print(f"bytes:    {result.bytes_uploaded}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level parser with one subparser per command."""
     parser = argparse.ArgumentParser(prog="python -m kb.cli", description="kb-mcp command line tools")
@@ -297,6 +438,38 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="confirm that the app is stopped and the file may be replaced"
     )
     restore.set_defaults(func=cmd_restore)
+
+    seed_p = sub.add_parser(
+        "seed", help="seed KB_DB from a manifest such as seeds/seeds.yaml (idempotent)"
+    )
+    seed_p.add_argument("manifest", help="path to the YAML manifest")
+    seed_p.add_argument(
+        "--dry-run", action="store_true", help="fetch and convert every entry, write nothing"
+    )
+    seed_p.set_defaults(func=cmd_seed)
+
+    eval_p = sub.add_parser(
+        "eval", help="run the evaluation questions against KB_DB and suggest tuned cutoffs"
+    )
+    eval_p.add_argument("questions", help="path to the questions YAML (tests/eval/questions.yaml)")
+    eval_p.add_argument(
+        "--no-duplicate", action="store_true", help="skip the near-duplicate measurement"
+    )
+    eval_p.set_defaults(func=cmd_eval)
+
+    search_p = sub.add_parser(
+        "search",
+        help="show the top hits for queries against a temporary copy of KB_DB (records no gaps)",
+    )
+    search_p.add_argument("queries", nargs="+", help="one or more queries (quote each)")
+    search_p.add_argument("-k", type=int, default=5, help="hits per query (default 5)")
+    search_p.set_defaults(func=cmd_search)
+
+    push = sub.add_parser(
+        "snapshot-push",
+        help="upload KB_DB as s3://$KB_BUCKET/snapshots/kb-latest.db.gz (restored at instance boot)",
+    )
+    push.set_defaults(func=cmd_snapshot_push)
     return parser
 
 

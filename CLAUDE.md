@@ -29,6 +29,7 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 - Model tests (loads real ONNX models, slower): `pytest -q -m models`
 - Run locally: `KB_DB=./.localdata/kb.db KB_WRITE_TOKENS=dev:devtoken uvicorn kb.main:app --port 8000 --workers 1`
 - Stdio MCP: `KB_DB=./.localdata/kb.db KB_WRITE_TOKENS=dev:devtoken KB_TOKEN=devtoken python -m kb.cli mcp-stdio` (`KB_TOKEN` is checked against the token list, so the list must be available)
+- Seed: `KB_DB=./.localdata/seed/kb.db KB_MODEL_DIR=./.localdata/models python -m kb.cli seed seeds/seeds.yaml` (`--dry-run` checks every entry without writing); then `python -m kb.cli eval tests/eval/questions.yaml` and `KB_BUCKET=<bucket> python -m kb.cli snapshot-push` (docs/SETUP.md, "Seed the demo corpus")
 - Lint infra: `cfn-lint infra/*.yaml`
 - Deploy a stack: `infra/deploy.sh network|data|app [ImageTag]` (created in phases 01 and 06)
 
@@ -60,9 +61,9 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 | `KB_WRITE_TOKENS` | unset | Local override for the token list; when set, AWS is not called |
 | `KB_TOKEN` | unset | Token used by the stdio MCP entry point; must be one of the write tokens |
 | `AWS_REGION` | `us-east-1` | |
-| `KB_CONF_HIGH` / `KB_CONF_LOW` | `0.70` / `0.30` | Semantic confidence cutoffs (tuned in phase 11) |
+| `KB_CONF_HIGH` / `KB_CONF_LOW` | `0.70` / `0.02` | Semantic confidence cutoffs (tuned in phase 11 on the real corpus: reranker scores sit near 1 for answerable questions and near 0 for out-of-corpus ones) |
 | `KB_COSINE_CONF_HIGH` / `KB_COSINE_CONF_LOW` | `0.75` / `0.55` | Confidence cutoffs used only when `KB_RERANK=off` |
-| `KB_DUP_THRESHOLD` | `0.92` | Near-duplicate cosine cutoff (tuned in phase 11) |
+| `KB_DUP_THRESHOLD` | `0.96` | Near-duplicate cosine cutoff (tuned in phase 11: planted copy 0.9989, highest distinct pair 0.9300) |
 | `KB_SEARCH_TIMEOUT` | `3` | Seconds before a semantic search falls back to keyword |
 | `KB_EXTENSION_ORIGIN` | unset | `chrome-extension://<id>`, the only origin CORS allows (methods GET, POST, PATCH, DELETE; headers Authorization, Content-Type). Unset means no CORS headers at all. Set on the stack with the `ExtensionOrigin` parameter (`KB_EXTENSION_ORIGIN` for `infra/deploy.sh`) |
 | `KB_SEARCH_RATE` | `30/minute` | Search rate limit per client address, one shared budget for `GET /api/search`, the UI search pages and the MCP `search` tool (stdio is unlimited). Over the limit: HTTP 429, or the tool error "Rate limit exceeded, try again in a minute". A malformed value stops startup |

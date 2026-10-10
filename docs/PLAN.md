@@ -312,7 +312,7 @@ Seed about 60 public documents that exercise every input format and fit the cour
 | FastAPI docs from its GitHub repo | Markdown | 20 files | Front matter and heading chunking |
 | MCP specification pages | URL (HTML) | 5 pages | Lets Claude Code answer questions about itself |
 | One AWS whitepaper (e.g. Well-Architected) | PDF | 1 to 2 files | PDF conversion and long-doc chunking |
-| Planted: a lightly edited copy of one EC2 page | Markdown | 1 | Near-duplicate warning |
+| Planted: a lightly edited copy of one FastAPI page | Markdown | 1 | Near-duplicate warning |
 | Planted: 3 docs with `verified_at` backdated 200 days | any | 3 | `stale` output |
 
 `python -m kb.cli seed seeds/seeds.yaml` reads the manifest, ingests each entry through the normal service layer, then applies the planted cases. It is idempotent, so you can rerun it after a reset.
