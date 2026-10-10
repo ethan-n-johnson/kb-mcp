@@ -32,6 +32,7 @@ import asyncio
 import dataclasses
 import sqlite3
 import tempfile
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -81,6 +82,7 @@ class QuestionResult:
     top_url: str | None
     confidence: str
     mode: str
+    latency_ms: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -285,7 +287,9 @@ def _dup_report(conn: sqlite3.Connection, state: SearchState, planted: Path, ori
 async def _run(state: SearchState, questions: list[Question]) -> list[QuestionResult]:
     results: list[QuestionResult] = []
     for question in questions:
+        started = time.perf_counter()
         found = await pipeline.search(state, question.q, TOP_K)
+        latency_ms = (time.perf_counter() - started) * 1000.0
         urls = [hit.source_url for hit in found.results]
         doc_rank: int | None = None
         seen: list[int] = []
@@ -305,6 +309,7 @@ async def _run(state: SearchState, questions: list[Question]) -> list[QuestionRe
                 top_url=urls[0] if urls else None,
                 confidence=found.confidence,
                 mode=found.mode,
+                latency_ms=latency_ms,
             )
         )
     return results
@@ -394,20 +399,30 @@ def _fmt(value: float | None, digits: int = 4) -> str:
 def render(report: EvalReport) -> str:
     """The report as plain text for the terminal and for docs/PROGRESS.md."""
     lines: list[str] = []
-    lines.append(f"{'rank':>4}  {'score':>6}  {'conf':<6}  {'mode':<8}  kind        question")
+    lines.append(f"{'rank':>4}  {'score':>6}  {'conf':<6}  {'mode':<8}  {'ms':>5}  kind        question")
     for r in report.results:
         rank = "-" if r.rank is None else str(r.rank)
         flag = " (demo)" if r.question.demo else ""
         lines.append(
             f"{rank:>4}  {_fmt(r.top_score):>6}  {r.confidence:<6}  {r.mode:<8}"
-            f"  {r.question.kind:<10}  {r.question.q}{flag}"
+            f"  {r.latency_ms:>5.0f}  {r.question.kind:<10}  {r.question.q}{flag}"
         )
         if r.question.kind != "outside" and r.rank != 1:
-            lines.append(f"{'':>30}top hit: {r.top_url}")
+            lines.append(f"{'':>37}top hit: {r.top_url}")
     ans, out = report.answerable_scores(), report.outside_scores()
     s = report.settings
     lines.append("")
     lines.append(f"hit@1: {_pct(report.hit_at(1))}   hit@5: {_pct(report.hit_at(5))}")
+    times = sorted(r.latency_ms for r in report.results)
+    if times:
+        lines.append(
+            f"search latency: median {times[len(times) // 2]:.0f} ms, max {times[-1]:.0f} ms"
+            + (
+                f" (KB_RERANK_CANDIDATES={s.rerank_candidates}, KB_RERANK_MAX_CHARS={s.rerank_max_chars})"
+                if s is not None
+                else ""
+            )
+        )
     lines.append(f"answerable top scores (rank 1): {_range(ans)}")
     lines.append(f"out-of-corpus top scores:       {_range(out)}")
     if s is not None:

@@ -689,3 +689,50 @@ def test_fake_models_env_is_ignored_when_models_are_off(
     config.clear_token_cache()
     with TestClient(create_app()) as client:
         assert client.get("/healthz").json()["mode"] == "keyword"
+
+
+# --- rerank pool size and passage cut (phase 11: t3.medium timing) ----------------------
+
+
+def test_rerank_pool_is_capped_by_kb_rerank_candidates(open_app: OpenApp) -> None:
+    reranker = FakeReranker()
+    with open_app(reranker=reranker, KB_RERANK_CANDIDATES="2") as client:
+        load_corpus(client)
+        search(client, "zzzz qqqq")  # no FTS matches, so only the cosine pool is reranked
+    assert len(reranker.score_calls[0][1]) == 2
+
+
+def test_rerank_pool_adds_at_most_five_fts_hits(open_app: OpenApp) -> None:
+    reranker = FakeReranker()
+    with open_app(reranker=reranker, KB_RERANK_CANDIDATES="1") as client:
+        load_corpus(client)
+        search(client, "volume instance bucket subnet load balancer")
+    assert 1 < len(reranker.score_calls[0][1]) <= 1 + pipeline.FTS_CANDIDATES == 6
+
+
+def test_reranked_passages_are_cut_to_kb_rerank_max_chars(open_app: OpenApp) -> None:
+    reranker = FakeReranker()
+    with open_app(reranker=reranker, KB_RERANK_MAX_CHARS="120") as client:
+        load_corpus(client)
+        body = search(client, QUERIES["nat"][0])
+    assert body["mode"] == "semantic"
+    texts = reranker.score_calls[0][1]
+    assert texts and max(len(t) for t in texts) == 120
+    # The hit itself still carries the whole chunk's snippet, not the cut text.
+    assert body["results"][0]["snippet"]
+
+
+def test_without_the_reranker_the_cosine_pool_stays_30(open_app: OpenApp, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[int] = []
+    with open_app(KB_RERANK="off", KB_RERANK_CANDIDATES="2") as client:
+        index = client.app.state.search.index
+        original = index.top_k
+
+        def spy(qvec, k, allowed=None):  # type: ignore[no-untyped-def]
+            seen.append(k)
+            return original(qvec, k, allowed)
+
+        monkeypatch.setattr(index, "top_k", spy)
+        load_corpus(client)
+        search(client, QUERIES["nat"][0])
+    assert seen == [pipeline.SEMANTIC_CANDIDATES]

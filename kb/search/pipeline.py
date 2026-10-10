@@ -1,9 +1,13 @@
 """Search pipeline: semantic path with rerank, keyword fallback, confidence, gaps.
 
 Semantic path (models healthy, toggle off), all under `KB_SEARCH_TIMEOUT`:
-embed the query, take the top 30 cosine matches, union the FTS5 top 10, rerank
-the union with the cross-encoder, keep at most 2 chunks per document and return
-the top `k`. A timeout or any exception falls through to the keyword path
+embed the query, take the top `KB_RERANK_CANDIDATES` cosine matches (15), union
+the FTS5 top 5, rerank the union with the cross-encoder (each passage cut to
+`KB_RERANK_MAX_CHARS`, 1000 characters), keep at most 2 chunks per document and
+return the top `k`. Without the reranker the top 30 cosine matches are ranked
+directly. The smaller rerank pool and the cut passages came from phase 11: on
+the t3.medium, reranking 40 full chunks took longer than the 3 second timeout,
+so every search fell back to keyword. A timeout or any exception falls through to the keyword path
 (FTS5 + BM25). With `KB_RERANK=off` there is no union and no cross-encoder:
 candidates are ranked by cosine and judged against the cosine cutoffs.
 
@@ -39,7 +43,7 @@ log = logging.getLogger(__name__)
 
 MAX_K = 20
 SEMANTIC_CANDIDATES = 30
-FTS_CANDIDATES = 10
+FTS_CANDIDATES = 5
 MAX_PER_DOC = 2
 
 T = TypeVar("T")
@@ -177,11 +181,14 @@ def semantic_confidence(top_score: float | None, high: float, low: float) -> str
 def _retrieve(
     state: SearchState, query: str, qvec: np.ndarray, tags: list[str]
 ) -> list[_Candidate]:
-    """Top-30 cosine matches (plus, when reranking, the FTS top 10) as candidates."""
+    """Top cosine matches (plus, when reranking, the FTS top 5) as candidates."""
     conn = db.connect(state.db_path)
     try:
         allowed = _tagged_doc_ids(conn, tags) if tags else None
-        hits = state.index.top_k(qvec, SEMANTIC_CANDIDATES, allowed)
+        pool = SEMANTIC_CANDIDATES
+        if state.rerank_enabled:
+            pool = min(pool, state.settings.rerank_candidates)
+        hits = state.index.top_k(qvec, pool, allowed)
         cosines = {chunk_id: score for chunk_id, _, score in hits}
         ids = [chunk_id for chunk_id, _, _ in hits]
         if state.rerank_enabled:
@@ -210,7 +217,8 @@ async def _semantic(state: SearchState, query: str, k: int, tags: list[str]) -> 
     if state.rerank_enabled:
         assert state.reranker is not None
         reranker = state.reranker
-        texts = [passage_text(c.title, c.heading_path, c.text) for c in candidates]
+        limit = settings.rerank_max_chars
+        texts = [passage_text(c.title, c.heading_path, c.text)[:limit] for c in candidates]
         scores = await _in_thread(reranker.score, query, texts) if candidates else []
         for cand, score in zip(candidates, scores):
             cand.score = float(score)

@@ -171,7 +171,7 @@ Semantic path:
 
 1. Embed the query with the bge query prefix ("Represent this sentence for searching relevant passages: ").
 2. Score every chunk with one matrix product. Vectors are L2-normalized at insert, so the dot product equals cosine similarity.
-3. Take the top 30 with `numpy.argpartition`, then union in the FTS5 top 10 so exact identifiers (error codes, flag names) are not missed.
+3. Take the top 30 with `numpy.argpartition` (the top `KB_RERANK_CANDIDATES`, 15, when reranking), then union in the FTS5 top 5 so exact identifiers (error codes, flag names) are not missed. Passages are cut to `KB_RERANK_MAX_CHARS` (1000) for the cross-encoder. (Phase 11: 30 plus 10 full chunks did not fit the timeout on the t3.medium.)
 4. Rerank the union with the cross-encoder, apply the sigmoid to get a 0 to 1 score, keep at most 2 chunks per doc, return the top `k` (default 5).
 
 Keyword fallback runs FTS5 `MATCH` with BM25 ranking and `snippet()` highlights. It triggers when:

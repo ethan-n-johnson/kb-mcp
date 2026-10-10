@@ -39,7 +39,9 @@ class Settings:
     cosine_conf_high: float = 0.75
     cosine_conf_low: float = 0.55
     dup_threshold: float = 0.96
-    search_timeout: float = 3.0
+    search_timeout: float = 5.0
+    rerank_candidates: int = 15
+    rerank_max_chars: int = 1000
     extension_origin: str | None = None
     search_rate: str = "30/minute"
     proxy_hops: int = 0
@@ -64,6 +66,10 @@ class Settings:
         interval = _float(e, "KB_SNAPSHOT_INTERVAL", cls.snapshot_interval)
         if not interval > 0:
             raise ValueError("KB_SNAPSHOT_INTERVAL must be greater than 0 seconds")
+        rerank_candidates = _int(e, "KB_RERANK_CANDIDATES", cls.rerank_candidates)
+        rerank_max_chars = _int(e, "KB_RERANK_MAX_CHARS", cls.rerank_max_chars)
+        if rerank_candidates < 1 or rerank_max_chars < 100:
+            raise ValueError("KB_RERANK_CANDIDATES must be at least 1 and KB_RERANK_MAX_CHARS at least 100")
         tokens_source = (e.get("KB_TOKENS_SOURCE") or cls.tokens_source).strip().lower()
         if tokens_source not in ("ssm", "s3"):
             raise ValueError("KB_TOKENS_SOURCE must be ssm or s3")
@@ -83,6 +89,8 @@ class Settings:
             cosine_conf_low=_float(e, "KB_COSINE_CONF_LOW", cls.cosine_conf_low),
             dup_threshold=_float(e, "KB_DUP_THRESHOLD", cls.dup_threshold),
             search_timeout=_float(e, "KB_SEARCH_TIMEOUT", cls.search_timeout),
+            rerank_candidates=rerank_candidates,
+            rerank_max_chars=rerank_max_chars,
             extension_origin=e.get("KB_EXTENSION_ORIGIN") or None,
             search_rate=(e.get("KB_SEARCH_RATE") or cls.search_rate).strip(),
             proxy_hops=_int(e, "KB_PROXY_HOPS", cls.proxy_hops),

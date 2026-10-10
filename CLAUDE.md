@@ -64,7 +64,9 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 | `KB_CONF_HIGH` / `KB_CONF_LOW` | `0.70` / `0.02` | Semantic confidence cutoffs (tuned in phase 11 on the real corpus: reranker scores sit near 1 for answerable questions and near 0 for out-of-corpus ones) |
 | `KB_COSINE_CONF_HIGH` / `KB_COSINE_CONF_LOW` | `0.75` / `0.55` | Confidence cutoffs used only when `KB_RERANK=off` |
 | `KB_DUP_THRESHOLD` | `0.96` | Near-duplicate cosine cutoff (tuned in phase 11: planted copy 0.9989, highest distinct pair 0.9300) |
-| `KB_SEARCH_TIMEOUT` | `3` | Seconds before a semantic search falls back to keyword |
+| `KB_SEARCH_TIMEOUT` | `5` | Seconds before a semantic search falls back to keyword (was 3; phase 11 measured over 3 s per search on the t3.medium) |
+| `KB_RERANK_CANDIDATES` | `15` | Cosine matches handed to the cross-encoder (plus up to 5 FTS hits). The reranker's cost grows with this; without the reranker the cosine pool stays 30 |
+| `KB_RERANK_MAX_CHARS` | `1000` | Each passage is cut to this many characters for reranking only (embedding and results use the whole chunk). Must be at least 100 |
 | `KB_EXTENSION_ORIGIN` | unset | `chrome-extension://<id>`, the only origin CORS allows (methods GET, POST, PATCH, DELETE; headers Authorization, Content-Type). Unset means no CORS headers at all. Set on the stack with the `ExtensionOrigin` parameter (`KB_EXTENSION_ORIGIN` for `infra/deploy.sh`) |
 | `KB_SEARCH_RATE` | `30/minute` | Search rate limit per client address, one shared budget for `GET /api/search`, the UI search pages and the MCP `search` tool (stdio is unlimited). Over the limit: HTTP 429, or the tool error "Rate limit exceeded, try again in a minute". A malformed value stops startup |
 | `KB_PROXY_HOPS` | `0` | Number of proxies in front of the app that each append to `X-Forwarded-For` (2 behind CloudFront and the ALB, set in the instance user data). The client address is the entry that many places from the right; `0` ignores the header. uvicorn's own proxy handling is off |

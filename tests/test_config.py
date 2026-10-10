@@ -34,7 +34,7 @@ def test_defaults() -> None:
     assert s.tokens_param == "/kb/write-tokens"
     assert (s.tokens_source, s.tokens_key) == ("ssm", "config/write-tokens")
     assert s.aws_region == "us-east-1"
-    assert (s.conf_high, s.conf_low, s.dup_threshold, s.search_timeout) == (0.70, 0.02, 0.96, 3.0)
+    assert (s.conf_high, s.conf_low, s.dup_threshold, s.search_timeout) == (0.70, 0.02, 0.96, 5.0)
     assert s.extension_origin is None
 
 
@@ -154,3 +154,13 @@ def test_s3_branch_logs_names_not_values(
     text = " ".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
     assert "alice" in text and "'s3'" in text
     assert "s3cret" not in text
+
+
+def test_rerank_settings_are_read_and_validated() -> None:
+    Settings = config.Settings
+    s = Settings.from_env({"KB_RERANK_CANDIDATES": "8", "KB_RERANK_MAX_CHARS": "600"})
+    assert (s.rerank_candidates, s.rerank_max_chars) == (8, 600)
+    assert (Settings().rerank_candidates, Settings().rerank_max_chars) == (15, 1000)
+    for bad in ({"KB_RERANK_CANDIDATES": "0"}, {"KB_RERANK_MAX_CHARS": "50"}):
+        with pytest.raises(ValueError, match="KB_RERANK"):
+            Settings.from_env(bad)
