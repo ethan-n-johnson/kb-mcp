@@ -320,12 +320,14 @@ Claude Code reaches the deployed server over HTTPS through CloudFront. Redo the 
    curl -s "$CF/api/search?q=ebs" > /dev/null
    ```
 
-2. Add the server to Claude Code. Copy a write token from `~/.config/kb-mcp/write-tokens` (the part after the colon); do not paste it anywhere else. If a `kb` server already exists, remove it first:
+2. Add the server to Claude Code. The MCP tools need no token. If a `kb` server already exists, remove it first:
 
    ```bash
    claude mcp remove kb 2>/dev/null
-   claude mcp add --transport http kb "$CF/mcp" --header "Authorization: Bearer <token>"
+   claude mcp add --transport http kb "$CF/mcp"
    ```
+
+   Optional: add `--header "Authorization: Bearer <token>"` with a write token from `~/.config/kb-mcp/write-tokens` (the part after the colon) to have your writes recorded under that token's name in the audit log instead of `mcp`.
 
    Start Claude Code and run `/mcp`: `kb` should be connected with 12 tools, `upload_file` among them.
 
@@ -340,7 +342,7 @@ Claude Code reaches the deployed server over HTTPS through CloudFront. Redo the 
    curl -sS --data-binary @"$HOME/Downloads/guide.pdf" "$URL"
    ```
 
-   A claude.ai chat cannot use this server as a connector: claude.ai custom connectors support OAuth or no authentication, not a bearer token. "From a chat" means Claude Code.
+   claude.ai can now add the server as a custom connector with the URL `$CF/mcp` and no authentication (the MCP tools need no token since 2026-10-10). The `upload_file` link still needs something that can run `curl` with a local file, so whole-file uploads stay a Claude Code flow; the other tools work from a claude.ai chat.
 
 4. Check that search finds it in semantic mode, for example "What percentage of the SAA-C03 exam is Design Secure Architectures?" in Claude Code, or `curl -s "$CF/api/search?q=SAA-C03+design+secure+architectures+percentage"`. Expect `mode` `semantic` and the new document at the top.
 

@@ -22,7 +22,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from kb import config, db
 from kb.main import create_app
-from kb.mcp_tools import TOOL_NAMES, WRITE_TOKEN_MESSAGE
+from kb.mcp_tools import MCP_ACTOR, TOOL_NAMES
 from tests.corpus import EBS, S3
 from tests.fakes import FakeEmbedder, FakeReranker
 
@@ -86,18 +86,19 @@ def test_sdk_client_lists_tools_and_searches(live_server: str, path: str, mode: 
     assert found.structured_content["results"][0]["doc_id"] == saved.structured_content["doc_id"]
 
 
-def test_sdk_client_without_a_token_can_read_but_not_write(live_server: str) -> None:
+def test_sdk_client_without_a_token_can_read_and_write(live_server: str) -> None:
     async def work() -> tuple[Any, Any, Any]:
         async with sdk_client(live_server + "/mcp") as client:
             listed = await client.call_tool("list_tags", {})
-            refused = await client.call_tool("upload", {"title": "No", "content": S3})
-            count = await client.call_tool("stale", {"days": 0})
-            return listed, refused, count
+            saved = await client.call_tool("upload", {"title": "Open", "content": S3})
+            got = await client.call_tool("get", {"doc_id": saved.structured_content["doc_id"]})
+            return listed, saved, got
 
-    listed, refused, count = run(work())
+    listed, saved, got = run(work())
     assert not listed.is_error and listed.structured_content == {"tags": []}
-    assert refused.is_error and refused.content[0].text.endswith(WRITE_TOKEN_MESSAGE)
-    assert count.structured_content == {"docs": []}  # nothing was stored
+    assert not saved.is_error and saved.structured_content["status"] == "created"
+    assert got.structured_content["title"] == "Open"
+    assert MCP_ACTOR == "mcp"
 
 
 def test_curl_style_post_to_the_bare_path_is_not_redirected(live_server: str) -> None:

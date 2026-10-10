@@ -1,4 +1,4 @@
-"""MCP tools over HTTP at `/mcp`: stateless JSON-RPC, no redirects, token rules.
+"""MCP tools over HTTP at `/mcp`: stateless JSON-RPC, no redirects, no token needed.
 
 Requests go straight to the mounted route with raw JSON-RPC (the way the
 acceptance `curl` does), so nothing depends on a client library. The SDK
@@ -14,11 +14,10 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from mcp.server.mcpserver.exceptions import ToolError
 
 from kb import service
 from kb.ingest.fetch import FetchResult
-from kb.mcp_tools import TOOL_NAMES, WRITE_TOKEN_MESSAGE, build_mcp, require_writer_mcp
+from kb.mcp_tools import MCP_ACTOR, TOOL_NAMES, build_mcp, mcp_actor
 from tests.conftest import OpenApp
 from tests.corpus import EBS, S3
 from tests.helpers import load_corpus, upload
@@ -30,7 +29,7 @@ PLAN = Path(__file__).parent.parent / "docs" / "PLAN.md"
 WRITE_TOOLS = ["upload", "upload_file", "update", "delete", "merge", "ingest_url", "verify"]
 READ_TOOLS = ["search", "get", "list_tags", "stale", "gaps"]
 
-# Calls that would change something if the token check let them through.
+# One call per write tool, used to show that none of them needs a token.
 WRITE_CALLS: dict[str, dict[str, Any]] = {
     "upload": {"title": "Note", "content": "# Note\n\nsome text that is long enough to chunk"},
     "upload_file": {"filename": "guide.pdf"},
@@ -126,11 +125,11 @@ def test_descriptions_say_when_to_use_the_tool(open_app: OpenApp) -> None:
     assert "possible_duplicate" in tools["upload"]["description"]
     assert "force=true" in tools["upload"]["description"]
     assert "most frequent first" in tools["gaps"]["description"]
-    for name in WRITE_TOOLS:
-        assert "write token" in tools[name]["description"], name
+    for name in TOOL_NAMES:
+        assert "token" not in tools[name]["description"], name
 
 
-def test_read_only_hints_follow_the_token_rules(open_app: OpenApp) -> None:
+def test_read_only_hints_mark_reads_and_writes(open_app: OpenApp) -> None:
     with open_app(models=False) as client:
         tools = listed_tools(client)
     for name in READ_TOOLS:
@@ -269,10 +268,9 @@ def test_missing_required_arguments_are_an_error_result(open_app: OpenApp) -> No
     assert "query" in error_text(result)
 
 
-# --- write tools: the token ----------------------------------------------------------------
+# --- write tools: no token needed ---------------------------------------------------------
 
 
-@pytest.mark.parametrize("tool", WRITE_TOOLS)
 @pytest.mark.parametrize(
     "headers",
     [
@@ -284,39 +282,19 @@ def test_missing_required_arguments_are_an_error_result(open_app: OpenApp) -> No
     ],
     ids=["missing", "wrong", "wrong-scheme", "empty", "no-scheme"],
 )
-def test_write_tools_refuse_without_a_valid_token_and_change_nothing(
-    open_app: OpenApp, tool: str, headers: dict[str, str]
+def test_write_tools_run_without_a_valid_token_and_audit_as_mcp(
+    open_app: OpenApp, headers: dict[str, str]
 ) -> None:
     with open_app() as client:
         first, second = upload(client, EBS), upload(client, S3)
-        before = (
-            scalar(client, "SELECT count(*) FROM docs"),
-            scalar(client, "SELECT count(*) FROM audit_log"),
-            scalar(client, "SELECT updated_at || ifnull(verified_at, '') FROM docs WHERE id = ?", first),
-        )
-        result = call(client, tool, WRITE_CALLS[tool], headers=headers)
-        after = (
-            scalar(client, "SELECT count(*) FROM docs"),
-            scalar(client, "SELECT count(*) FROM audit_log"),
-            scalar(client, "SELECT updated_at || ifnull(verified_at, '') FROM docs WHERE id = ?", first),
-        )
+        order = ["upload", "upload_file", "update", "verify", "merge", "delete"]
+        results = {tool: call(client, tool, WRITE_CALLS[tool], headers=headers) for tool in order}
+        log = rows(client, "SELECT token_name, action FROM audit_log WHERE token_name = ? ORDER BY id", MCP_ACTOR)
     assert first == 1 and second == 2
-    assert result["isError"] is True
-    assert error_text(result).endswith(WRITE_TOKEN_MESSAGE)
-    assert before == after
-
-
-def test_every_refusal_reads_the_same(open_app: OpenApp) -> None:
-    """The message never says which part of the check failed."""
-    with open_app(models=False) as client:
-        texts = {
-            error_text(call(client, "upload", WRITE_CALLS["upload"], headers=h))
-            for h in ({}, {"authorization": "Bearer nope"}, {"authorization": "Basic x"})
-        }
-    assert len(texts) == 1
-    (text,) = texts
-    assert "testtoken" not in text and "nope" not in text
-    assert text == f"Error executing tool upload: {WRITE_TOKEN_MESSAGE}"
+    for tool in order:
+        assert results[tool]["isError"] is False, (tool, results[tool])
+    actions = [r["action"] for r in log]
+    assert {"upload", "update", "verify", "merge", "delete"} <= set(actions), actions
 
 
 def test_the_token_is_never_logged(open_app: OpenApp, caplog: pytest.LogCaptureFixture) -> None:
@@ -451,7 +429,7 @@ def test_a_crash_shows_no_details(open_app: OpenApp, monkeypatch: pytest.MonkeyP
     assert error_text(result) == "Error executing tool list_tags"
 
 
-# --- require_writer_mcp ----------------------------------------------------------------------
+# --- mcp_actor ------------------------------------------------------------------------------
 
 
 def _ctx(headers: dict[str, str] | None) -> Any:
@@ -470,34 +448,29 @@ def tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     config.clear_token_cache()
 
 
-def test_http_reads_the_authorization_header(tokens: None) -> None:
-    assert require_writer_mcp(_ctx({"authorization": "Bearer testtoken"})) == "test"
-    assert require_writer_mcp(_ctx({"authorization": "bearer demotoken"})) == "demo"
+def test_http_names_the_actor_from_a_valid_token_else_mcp(tokens: None) -> None:
+    assert mcp_actor(_ctx({"authorization": "Bearer testtoken"})) == "test"
+    assert mcp_actor(_ctx({"authorization": "bearer demotoken"})) == "demo"
     for headers in ({}, {"authorization": "Bearer nope"}, {"authorization": "Token testtoken"}):
-        with pytest.raises(ToolError, match=f"^{WRITE_TOKEN_MESSAGE}$"):
-            require_writer_mcp(_ctx(headers))
+        assert mcp_actor(_ctx(headers)) == MCP_ACTOR
 
 
 def test_http_never_falls_back_to_the_environment(tokens: None, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KB_TOKEN", "testtoken")
-    with pytest.raises(ToolError):
-        require_writer_mcp(_ctx(None))  # a request-less call over HTTP
-    with pytest.raises(ToolError):
-        require_writer_mcp(_ctx({}))  # a request without the header
+    assert mcp_actor(_ctx(None)) == MCP_ACTOR  # a request-less call over HTTP
+    assert mcp_actor(_ctx({})) == MCP_ACTOR  # a request without the header
 
 
-def test_stdio_uses_kb_token(tokens: None, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stdio_names_the_actor_from_kb_token(tokens: None, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KB_TOKEN", "demotoken")
-    assert require_writer_mcp(_ctx(None), stdio=True) == "demo"
+    assert mcp_actor(_ctx(None), stdio=True) == "demo"
     monkeypatch.setenv("KB_TOKEN", "wrong")
-    with pytest.raises(ToolError, match=WRITE_TOKEN_MESSAGE):
-        require_writer_mcp(_ctx(None), stdio=True)
+    assert mcp_actor(_ctx(None), stdio=True) == MCP_ACTOR
     monkeypatch.delenv("KB_TOKEN")
-    with pytest.raises(ToolError, match=WRITE_TOKEN_MESSAGE):
-        require_writer_mcp(_ctx(None), stdio=True)
+    assert mcp_actor(_ctx(None), stdio=True) == MCP_ACTOR
 
 
-def test_an_unreadable_token_store_denies_instead_of_crashing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_unreadable_token_store_still_lets_the_call_through(monkeypatch: pytest.MonkeyPatch) -> None:
     from kb import config
 
     monkeypatch.delenv("KB_WRITE_TOKENS", raising=False)
@@ -507,8 +480,7 @@ def test_an_unreadable_token_store_denies_instead_of_crashing(monkeypatch: pytes
         raise RuntimeError("ssm unreachable")
 
     monkeypatch.setattr(config, "load_write_tokens", broken)
-    with pytest.raises(ToolError, match=f"^{WRITE_TOKEN_MESSAGE}$"):
-        require_writer_mcp(_ctx({"authorization": "Bearer anything"}))
+    assert mcp_actor(_ctx({"authorization": "Bearer anything"})) == MCP_ACTOR
 
 
 def test_build_mcp_accepts_a_state_or_a_function(svc: Any) -> None:

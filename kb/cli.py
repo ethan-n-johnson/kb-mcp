@@ -130,7 +130,8 @@ def cmd_mcp_stdio(args: argparse.Namespace) -> int:
     Stdout carries the protocol, so logging goes to stderr and nothing else is
     printed. Startup mirrors the web app: open the database, load the models
     (unless `KB_MODELS=off`), backfill missing vectors and build the index, then
-    run the same 11 tools. Write tools read the token from `KB_TOKEN`.
+    run the same tools. No token is needed; `KB_TOKEN`, if set, only names the actor
+    in the audit log.
     """
     import asyncio
 
@@ -408,7 +409,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     stdio = sub.add_parser(
         "mcp-stdio",
-        help="serve the MCP tools over stdio against KB_DB (token from KB_TOKEN; logs go to stderr)",
+        help="serve the MCP tools over stdio against KB_DB (no token needed; logs go to stderr)",
     )
     stdio.set_defaults(func=cmd_mcp_stdio)
 

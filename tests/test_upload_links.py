@@ -75,11 +75,11 @@ def test_pending_tickets_are_capped_oldest_first() -> None:
 # --- over MCP (HTTP) ---------------------------------------------------------------------
 
 
-def test_upload_file_needs_a_write_token(open_app: OpenApp) -> None:
+def test_upload_file_works_without_a_token(open_app: OpenApp) -> None:
     with open_app(models=False) as client:
-        result = call(client, "upload_file", {"filename": "guide.pdf"})
-    assert "write token" in error_text(result)
-    assert uploads.STORE.pending() == 0
+        link = ok(call(client, "upload_file", {"filename": "guide.pdf"}))
+    assert link["status"] == "upload_link"
+    assert uploads.STORE.pending() == 1
 
 
 def test_link_then_bytes_stores_a_pdf_as_the_token_owner(open_app: OpenApp) -> None:

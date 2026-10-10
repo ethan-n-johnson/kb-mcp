@@ -2,7 +2,7 @@
 
 `build_mcp(state)` returns an `MCPServer` (the `mcp` 2.x name of what 1.x called
 `FastMCP`) with the tool set from PLAN.md. Tools hold no business logic: they
-check the write token (write tools only), call one `kb.service` function in a
+work out who is calling (write tools only), call one `kb.service` function in a
 worker thread and return the pydantic result as a plain dict, the same shape the
 REST route returns.
 
@@ -11,9 +11,11 @@ Errors a caller can act on (`ServiceError`, `IngestError`, bad arguments) become
 message. Anything else is a crash: the SDK logs it and the client sees only
 "Error executing tool <name>".
 
-Token rules: over HTTP the token is the request's `Authorization: Bearer`
-header; over stdio there is no request, so it is `KB_TOKEN`. Both go through
-`auth.check_token`.
+No token is required: every tool, read or write, runs without one (so clients
+that cannot send a bearer header, such as claude.ai connectors, can use them).
+A token is still accepted only to name the actor in the audit log: over HTTP
+the request's `Authorization: Bearer` header, over stdio `KB_TOKEN`. A missing
+or unknown token is not an error; the actor is then `MCP_ACTOR`.
 """
 
 import logging
@@ -42,8 +44,8 @@ log = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-WRITE_TOKEN_MESSAGE = "This tool needs a valid write token"
-"""Shown for every failed token check; it never says which part failed."""
+MCP_ACTOR = "mcp"
+"""Audit log actor for a tool call that carries no valid token."""
 
 TOOL_NAMES = (
     "search",
@@ -62,8 +64,7 @@ TOOL_NAMES = (
 
 INSTRUCTIONS = (
     "Team knowledge base for the Cloud Computing course (AWS). Search it before answering "
-    "questions about our systems, AWS setup or runbooks. Reading needs no token; tools that "
-    "change the knowledge base need a write token."
+    "questions about our systems, AWS setup or runbooks. No token is needed."
 )
 
 DESCRIPTIONS: dict[str, str] = {
@@ -86,8 +87,7 @@ DESCRIPTIONS: dict[str, str] = {
         "to remember, record or add something. `format` is `markdown` (default), `html` or "
         "`pdf` (for pdf, `content` is base64). If the result is `possible_duplicate`, show "
         "the candidates and ask whether to update one of them, merge, or save anyway with "
-        "force=true. A `duplicate` result means identical content is already stored. "
-        "Needs a write token."
+        "force=true. A `duplicate` result means identical content is already stored."
     ),
     "upload_file": (
         "Save a whole file (PDF, Markdown, text or HTML) from disk. Use it when the user "
@@ -96,31 +96,29 @@ DESCRIPTIONS: dict[str, str] = {
         "one file): send the file's bytes as the body of a POST there, for example with the "
         "returned `curl` command after replacing the placeholder with the file's path, and "
         "read the upload result from the response. On a local (stdio) server `filename` is "
-        "the file's path and the file is stored right away. Needs a write token."
+        "the file's path and the file is stored right away."
     ),
     "update": (
         "Change an existing document: new `content` (Markdown by default; set `format` to "
         "`html`, or `pdf` with base64 content, to have it converted like an upload), a new "
         "`title`, or a new full `tags` list (tags replace the old set; an empty list clears "
-        "them). Use it to fix or refresh a document instead of uploading a second copy. "
-        "Needs a write token."
+        "them). Use it to fix or refresh a document instead of uploading a second copy."
     ),
     "delete": (
         "Permanently remove a document with its chunks, tags and search entries. Only use "
         "it when the user clearly asks for the deletion; prefer `update` or `merge` for "
-        "cleanup. Needs a write token."
+        "cleanup."
     ),
     "merge": (
         "Fold duplicate or overlapping documents into one: the `source_ids` documents are "
         "appended to `target_id` as sections (their source URLs and tags are kept) and, "
         "unless `delete_sources` is false, removed. Use it after an upload reports "
-        "`possible_duplicate`, or when the user asks to combine notes. Needs a write token."
+        "`possible_duplicate`, or when the user asks to combine notes."
     ),
     "ingest_url": (
         "Fetch one public web page or PDF by URL and store it in the knowledge base. Use it "
         "when the user gives a link to documentation they want kept; it cannot read pages "
-        "behind a login. Like `upload`, it can answer `possible_duplicate` or `duplicate`. "
-        "Needs a write token."
+        "behind a login. Like `upload`, it can answer `possible_duplicate` or `duplicate`."
     ),
     "list_tags": (
         "List every tag with the number of documents that carry it, most used first. Use it "
@@ -130,8 +128,7 @@ DESCRIPTIONS: dict[str, str] = {
     "verify": (
         "Record that a person checked a document and it is still correct (sets "
         "`verified_at` and `verified_by`). Use it after the user confirms a document is "
-        "current, typically one listed by `stale`. `note` is saved in the audit log. "
-        "Needs a write token."
+        "current, typically one listed by `stale`. `note` is saved in the audit log."
     ),
     "stale": (
         "List documents nobody has verified or updated for `days` days, oldest first. Use "
@@ -151,15 +148,13 @@ DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
 SearchStateSource = SearchState | Callable[[], SearchState]
 
 
-def require_writer_mcp(ctx: Context, *, stdio: bool = False) -> str:
-    """Return the name of the write token behind this tool call, or raise `ToolError`.
+def mcp_actor(ctx: Context, *, stdio: bool = False) -> str:
+    """Return the name to record in the audit log for this tool call. Never refuses.
 
-    Over HTTP the secret comes from the request's `Authorization: Bearer` header
-    (`ctx.request_context.request`). With `stdio=True` there is no request and
-    the secret is the `KB_TOKEN` environment variable; an HTTP call that somehow
-    carries no request is refused rather than falling back to the environment.
-    Every failure raises the same message, `WRITE_TOKEN_MESSAGE`. A token store
-    that cannot be read also denies (and is logged), so the check fails closed.
+    Over HTTP a valid `Authorization: Bearer` token names the actor; over stdio
+    (`stdio=True`, no request) `KB_TOKEN` does. Anything else, including a
+    missing or wrong token or a token store that cannot be read, gives
+    `MCP_ACTOR`. An HTTP call never falls back to the environment.
     """
     request = ctx.request_context.request
     secret: str | None
@@ -169,14 +164,14 @@ def require_writer_mcp(ctx: Context, *, stdio: bool = False) -> str:
         secret = os.environ.get("KB_TOKEN") or None
     else:
         secret = None
+    if secret is None:
+        return MCP_ACTOR
     try:
         name = check_token(secret)
     except Exception:
-        log.error("write token check failed", exc_info=True)
+        log.warning("write token lookup failed; recording the call as %s", MCP_ACTOR, exc_info=True)
         name = None
-    if name is None:
-        raise ToolError(WRITE_TOKEN_MESSAGE)
-    return name
+    return name or MCP_ACTOR
 
 
 def _as_tool_error(exc: Exception) -> Exception:
@@ -201,7 +196,7 @@ def build_mcp(source: SearchStateSource, *, stdio: bool = False) -> MCPServer:
 
     `source` is the shared `SearchState`, or a function returning it: the HTTP
     app creates its state in the FastAPI lifespan, after the tools are built.
-    `stdio=True` makes write tools read the token from `KB_TOKEN`.
+    `stdio=True` makes write tools take the audit log name from `KB_TOKEN`.
     """
 
     def state() -> SearchState:
@@ -223,13 +218,10 @@ def build_mcp(source: SearchStateSource, *, stdio: bool = False) -> MCPServer:
             raise _as_tool_error(exc)
 
     async def call_write(ctx: Context, fn: Callable[[sqlite3.Connection, str], T]) -> T:
-        """Check the token, then run `fn(conn, actor)` in a worker thread.
-
-        The token check comes first, so a refused call never opens the database.
-        """
+        """Run `fn(conn, actor)` in a worker thread; `actor` comes from `mcp_actor`."""
 
         def work() -> T:
-            actor = require_writer_mcp(ctx, stdio=stdio)
+            actor = mcp_actor(ctx, stdio=stdio)
             conn = db.connect(state().db_path)
             try:
                 return fn(conn, actor)

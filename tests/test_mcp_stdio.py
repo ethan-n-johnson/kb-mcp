@@ -21,7 +21,7 @@ from mcp import Client, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from kb import db, service
-from kb.mcp_tools import TOOL_NAMES, WRITE_TOKEN_MESSAGE
+from kb.mcp_tools import MCP_ACTOR, TOOL_NAMES
 from kb.schemas import UploadRequest
 from tests.corpus import EBS, S3
 
@@ -124,20 +124,21 @@ def test_write_tools_use_kb_token(stdio_db: Path, tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("token", [None, "wrong"], ids=["no-token", "wrong-token"])
-def test_write_tools_refuse_without_a_valid_kb_token(stdio_db: Path, tmp_path: Path, token: str | None) -> None:
+def test_write_tools_work_without_a_valid_kb_token(stdio_db: Path, tmp_path: Path, token: str | None) -> None:
     extra = {} if token is None else {"KB_TOKEN": token}
 
     async def work(client: Client) -> Any:
-        return await client.call_tool("upload", {"title": "No", "content": "# No\n\nnot saved"})
+        return await client.call_tool("upload", {"title": "Open", "content": "# Open\n\nsaved without a token"})
 
     result = run_client(child_env(stdio_db, **extra), tmp_path / "err.log", work)
-    assert result.is_error
-    assert result.content[0].text.endswith(WRITE_TOKEN_MESSAGE)
+    assert not result.is_error and result.structured_content["status"] == "created"
     conn = db.connect(stdio_db)
     try:
-        assert conn.execute("SELECT count(*) FROM docs").fetchone()[0] == 2
+        assert conn.execute("SELECT count(*) FROM docs").fetchone()[0] == 3
+        last = conn.execute("SELECT token_name FROM audit_log ORDER BY id DESC LIMIT 1").fetchone()
     finally:
         conn.close()
+    assert last["token_name"] == MCP_ACTOR
 
 
 def test_stdout_carries_only_protocol_and_logs_go_to_stderr(stdio_db: Path) -> None:

@@ -694,18 +694,16 @@ def test_every_non_get_route_refuses_a_missing_or_wrong_token(open_app: OpenApp)
         assert {"/ui/add/paste", "/ui/admin/fallback"} <= {p for _, p in checked}
 
 
-def test_every_mcp_write_tool_refuses_a_missing_or_wrong_token(open_app: OpenApp) -> None:
-    arguments = {
-        "upload": {"title": "t", "content": "c"}, "upload_file": {"filename": "a.pdf"},
-        "update": {"doc_id": 1, "title": "x"},
-        "delete": {"doc_id": 1}, "merge": {"target_id": 1, "source_ids": [2]},
-        "ingest_url": {"url": "https://example.com/"}, "verify": {"doc_id": 1},
-    }
+def test_mcp_write_tools_need_no_token_but_rest_writes_still_do(open_app: OpenApp) -> None:
+    """MCP tools are open (claude.ai connectors cannot send a bearer token); REST is not."""
     with open_app() as client:
-        for tool, args in arguments.items():
-            for headers in ({}, {"Authorization": "Bearer wrong"}):
-                result = call(client, tool, args, headers=headers)
-                assert error_text(result).endswith("This tool needs a valid write token"), tool
+        result = call(client, "upload", {"title": "t", "content": "# t\n\nopen write"})
+        assert result["isError"] is False, result
+        for headers in ({}, {"Authorization": "Bearer wrong"}):
+            resp = client.post("/api/docs", json={"title": "t", "content": "c"}, headers=headers)
+            assert resp.status_code == 401
+            resp = client.post("/api/upload-links", json={"filename": "a.pdf"}, headers=headers)
+            assert resp.status_code == 401
 
 
 # --- error hygiene -------------------------------------------------------------------------------
@@ -889,3 +887,14 @@ def test_the_image_makes_the_code_readable_for_the_runtime_user() -> None:
     # The first command run as the runtime user imports the app, so unreadable code fails the build.
     after = "\n".join(lines[user:])
     assert "import kb.cli, kb.main;" in after.split("from fastembed", 1)[0]
+
+
+def test_mcp_refuses_a_non_json_body_so_web_pages_need_a_cors_preflight(open_app: OpenApp) -> None:
+    """With no token on the MCP tools, the JSON `Content-Type` is what stops a plain cross-site form post."""
+    body = '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"upload","arguments":{"title":"x","content":"# x"}}}'
+    with open_app(models=False) as client:
+        resp = client.post(
+            "/mcp", content=body,
+            headers={"content-type": "text/plain", "accept": "application/json, text/event-stream"},
+        )
+    assert resp.status_code == 400

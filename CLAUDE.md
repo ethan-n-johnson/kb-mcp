@@ -28,7 +28,7 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 - Fast tests (models off): `pytest -q`
 - Model tests (loads real ONNX models, slower): `pytest -q -m models`
 - Run locally: `KB_DB=./.localdata/kb.db KB_WRITE_TOKENS=dev:devtoken uvicorn kb.main:app --port 8000 --workers 1`
-- Stdio MCP: `KB_DB=./.localdata/kb.db KB_WRITE_TOKENS=dev:devtoken KB_TOKEN=devtoken python -m kb.cli mcp-stdio` (`KB_TOKEN` is checked against the token list, so the list must be available)
+- Stdio MCP: `KB_DB=./.localdata/kb.db python -m kb.cli mcp-stdio` (no token needed; add `KB_WRITE_TOKENS=dev:devtoken KB_TOKEN=devtoken` to record writes as `dev` instead of `mcp`)
 - Seed: `KB_DB=./.localdata/seed/kb.db KB_MODEL_DIR=./.localdata/models python -m kb.cli seed seeds/seeds.yaml` (`--dry-run` checks every entry without writing); then `python -m kb.cli eval tests/eval/questions.yaml` and `KB_BUCKET=<bucket> python -m kb.cli snapshot-push` (docs/SETUP.md, "Seed the demo corpus")
 - Lint infra: `cfn-lint infra/*.yaml`
 - Deploy a stack: `infra/deploy.sh network|data|app [ImageTag]` (created in phases 01 and 06)
@@ -42,6 +42,7 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 - Every interface (REST, MCP over HTTP, MCP over stdio, UI, extension) calls `kb/service.py`. No business logic in `api.py`, `mcp_tools.py`, `ui.py` or templates.
 - Logs are one JSON object per line. Stdout in server mode; **stderr in stdio MCP mode** (stdout carries the protocol).
 - `GET /healthz` returns 200 whenever the database is readable, including in keyword mode. Model failure must never make the ALB kill the instance.
+- The MCP tools (HTTP and stdio) need no token (PROGRESS.md deviation "MCP tools need no token"); REST, UI and extension writes still do.
 - Secrets never go in code, user data, Docker images or git. Write tokens come from `s3://<bucket>/config/write-tokens` on the instances (`KB_TOKENS_SOURCE=s3`, deviation 8), SSM `/kb/write-tokens` by default, or `KB_WRITE_TOKENS` locally.
 
 ## Configuration (`kb/config.py`, all from environment)
@@ -59,7 +60,7 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 | `KB_TOKENS_PARAM` | `/kb/write-tokens` | SSM SecureString with `name:secret,name:secret` (`KB_TOKENS_SOURCE=ssm`) |
 | `KB_TOKENS_KEY` | `config/write-tokens` | Object in `KB_BUCKET` with `name:secret,name:secret` (`KB_TOKENS_SOURCE=s3`) |
 | `KB_WRITE_TOKENS` | unset | Local override for the token list; when set, AWS is not called |
-| `KB_TOKEN` | unset | Token used by the stdio MCP entry point; must be one of the write tokens |
+| `KB_TOKEN` | unset | Optional for the stdio MCP entry point: if it matches a write token, writes are audited under that token's name, else as `mcp` |
 | `AWS_REGION` | `us-east-1` | |
 | `KB_CONF_HIGH` / `KB_CONF_LOW` | `0.70` / `0.02` | Semantic confidence cutoffs (tuned in phase 11 on the real corpus: reranker scores sit near 1 for answerable questions and near 0 for out-of-corpus ones) |
 | `KB_COSINE_CONF_HIGH` / `KB_COSINE_CONF_LOW` | `0.75` / `0.55` | Confidence cutoffs used only when `KB_RERANK=off` |

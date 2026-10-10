@@ -9,8 +9,10 @@ things in the installed `mcp` 2.x SDK need handling here:
   routing and both forms answer directly.
 - `streamable_http_app` turns on DNS rebinding protection (it only accepts a
   `Host` of localhost) unless told otherwise. The service is reached through
-  CloudFront and the ALB under other host names, and every write needs a bearer
-  token that a browser never attaches by itself, so the check is switched off.
+  CloudFront and the ALB under other host names, so the check is switched off.
+  The MCP tools need no token, so what keeps a web page from calling them is the
+  JSON `Content-Type` the transport requires: a cross-origin browser request
+  with it needs a CORS preflight, and only `KB_EXTENSION_ORIGIN` is allowed.
 """
 
 from fastapi import FastAPI
