@@ -1,6 +1,6 @@
 # kb-mcp
 
-Knowledge-base MCP server for the Cloud Computing course (AWS Academy Cloud Architecting). One FastAPI service on AWS: semantic search with local CPU models, keyword fallback, 11 MCP tools, REST, web UI, Chrome capture extension. Demo: Wed Oct 14, 2026.
+Knowledge-base MCP server for the Cloud Computing course (AWS Academy Cloud Architecting). One FastAPI service on AWS: semantic search with local CPU models, keyword fallback, 12 MCP tools, REST, web UI, Chrome capture extension. Demo: Wed Oct 14, 2026.
 
 - Full design: `docs/PLAN.md` (source of truth for behavior and numbers)
 - Work breakdown: `docs/phases/` (one file per phase, index in `docs/phases/README.md`)

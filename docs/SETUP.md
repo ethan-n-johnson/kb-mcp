@@ -306,6 +306,48 @@ Do this once (it only needs repeating if the manifest changes). Lab credentials 
 
 ---
 
+## Connect Claude Code and upload a file
+
+Claude Code reaches the deployed server over HTTPS through CloudFront. Redo the `claude mcp add` step whenever the CloudFront domain changes (a new sandbox account, or `kb-app` deleted and recreated). A plain redeploy keeps the domain.
+
+1. Find the domain and check the server (run one warm-up search after every deploy, the first one loads the models):
+
+   ```bash
+   CF=https://$(aws cloudformation describe-stacks --region us-east-1 --stack-name kb-app \
+     --query "Stacks[0].Outputs[?OutputKey=='DistributionDomainName'].OutputValue" --output text)
+   echo "$CF"
+   curl -s "$CF/healthz"                    # expect mode semantic
+   curl -s "$CF/api/search?q=ebs" > /dev/null
+   ```
+
+2. Add the server to Claude Code. Copy a write token from `~/.config/kb-mcp/write-tokens` (the part after the colon); do not paste it anywhere else. If a `kb` server already exists, remove it first:
+
+   ```bash
+   claude mcp remove kb 2>/dev/null
+   claude mcp add --transport http kb "$CF/mcp" --header "Authorization: Bearer <token>"
+   ```
+
+   Start Claude Code and run `/mcp`: `kb` should be connected with 12 tools, `upload_file` among them.
+
+3. Upload a whole file (PDF, Markdown, text or HTML, at most 20 MB) by asking in the chat, for example: "Save ~/Downloads/solutions-architect-associate-03.pdf to the kb with the tags aws, certification". Claude Code calls `upload_file`, which returns a one-time link (15 minutes, one file), then runs the `curl` command from the result with the file's path. Approve that Bash command when Claude Code asks. The `curl` output is the upload result: `stored` with a `doc_id`, `possible_duplicate` (ask for a new link with force if you still want it), or `duplicate` (the same bytes are already stored).
+
+   The same flow by hand, without Claude Code:
+
+   ```bash
+   URL=$(curl -s -X POST "$CF/api/upload-links" -H "Authorization: Bearer $KB_TOKEN" \
+     -H 'content-type: application/json' -d '{"filename":"guide.pdf","tags":["aws"]}' \
+     | python3 -c 'import json,sys; print(json.load(sys.stdin)["url"])')
+   curl -sS --data-binary @"$HOME/Downloads/guide.pdf" "$URL"
+   ```
+
+   A claude.ai chat cannot use this server as a connector: claude.ai custom connectors support OAuth or no authentication, not a bearer token. "From a chat" means Claude Code.
+
+4. Check that search finds it in semantic mode, for example "What percentage of the SAA-C03 exam is Design Secure Architectures?" in Claude Code, or `curl -s "$CF/api/search?q=SAA-C03+design+secure+architectures+percentage"`. Expect `mode` `semantic` and the new document at the top.
+
+5. Run `infra/up.sh save` so the next sandbox account restores the knowledge base with the new file.
+
+---
+
 ## Deploy flow (what the phases run)
 
 `infra/up.sh` (above) runs all of this in order and skips what exists. The steps below are what it does, for running one piece by hand. Run from `kb-mcp` in a bash shell (Linux, or the Ubuntu terminal on Windows). Run the commands **one at a time** and check each one finished without an error before the next; pasting the whole block keeps going after a failure.
