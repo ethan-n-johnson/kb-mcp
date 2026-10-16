@@ -9,7 +9,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-import pytest
 
 from tests.test_infra import load, render_user_data
 

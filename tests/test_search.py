@@ -9,7 +9,6 @@ backfill, rebuild without re-embedding, delete, tags and `KB_RERANK=off`.
 from __future__ import annotations
 
 import logging
-import sqlite3
 import time
 from typing import Any, Sequence
 

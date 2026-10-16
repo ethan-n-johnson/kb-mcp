@@ -38,6 +38,19 @@ include = ["kb*"]
 [tool.setuptools.package-data]
 kb = ["templates/*", "static/*"]
 
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# Only rules that catch real bugs (syntax errors, undefined names, unused imports).
+# Style rules are off on purpose: widen this list only after fixing what they flag.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest fixtures are imported from other test modules and then used as arguments,
+# which ruff reads as a redefinition.
+"tests/*" = ["F811"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-m 'not models'"
