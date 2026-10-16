@@ -181,6 +181,7 @@ def test_stdout_carries_only_protocol_and_logs_go_to_stderr(stdio_db: Path) -> N
             if "id" in message:
                 seen.add(message["id"])
         proc.stdin.close()
+        proc.stdin = None
         rest, stderr = proc.communicate(timeout=30)
         out_lines += rest.splitlines()
     finally:

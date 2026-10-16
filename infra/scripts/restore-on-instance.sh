@@ -44,7 +44,9 @@ case "${1:-}" in
     restore_args=(--latest)
     ;;
   --key)
-    [ $# -eq 2 ] && [ -n "$2" ] || usage
+    if [ $# -ne 2 ] || [ -z "$2" ]; then
+      usage
+    fi
     restore_args=(--key "$2")
     ;;
   *)
