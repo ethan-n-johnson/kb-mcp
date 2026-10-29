@@ -31,7 +31,8 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 - Stdio MCP: `KB_DB=./.localdata/kb.db python -m kb.cli mcp-stdio` (no token needed; add `KB_WRITE_TOKENS=dev:devtoken KB_TOKEN=devtoken` to record writes as `dev` instead of `mcp`)
 - Seed: `KB_DB=./.localdata/seed/kb.db KB_MODEL_DIR=./.localdata/models python -m kb.cli seed seeds/seeds.yaml` (`--dry-run` checks every entry without writing); then `python -m kb.cli eval tests/eval/questions.yaml` and `KB_BUCKET=<bucket> python -m kb.cli snapshot-push` (docs/SETUP.md, "Seed the demo corpus")
 - Lint infra: `cfn-lint infra/*.yaml`
-- Deploy a stack: `infra/deploy.sh network|data|app [ImageTag]` (created in phases 01 and 06)
+- Deploy a stack: `infra/deploy.sh network|data|db|app [ImageTag]` (created in phases 01, 06 and 19; `db` needs `KB_DB_PASSWORD` in the environment, which `infra/up.sh` supplies from `~/.config/kb-mcp/db-password`)
+- Probe what RDS the sandbox allows: `infra/probe-rds.sh [--try-subnet-group]`
 
 ## Runtime rules (never break these)
 
@@ -88,6 +89,6 @@ Blocked: **ECR** (`ecr:CreateRepository` is AccessDenied) and **EFS** (`elasticf
 - KMS is list only, so an encrypted root volume may fail with `Client.InternalError`; the fallback is `Encrypted: false`, recorded in `docs/PROGRESS.md`.
 - More than 9 instances suspends the account. The Auto Scaling group is max 1; never launch other instances.
 - Credentials are temporary. If an AWS call fails with `ExpiredToken` or `InvalidClientTokenId`, stop and ask the user to refresh `~/.aws/credentials` from the AWS Academy console (**HUMAN**).
-- Stacks: `kb-network`, `kb-data`, `kb-app`. Never delete `kb-network` or `kb-data`. `kb-app` may be deleted between sessions to save credit; the next deploy restores the database from the S3 snapshot.
+- Stacks: `kb-network`, `kb-data`, `kb-db`, `kb-app`. Never delete `kb-network` or `kb-data`. `kb-app` may be deleted between sessions to save credit; the next deploy restores the database from the S3 snapshot. `kb-db` (RDS PostgreSQL with pgvector, phase 19) may be deleted between sessions only after an export to S3 (phase 20), because deleting it destroys the data.
 - Always run `cfn-lint` and `aws cloudformation validate-template` before deploying.
 - Ask the user before any destructive AWS action (deleting a stack, terminating an instance), except where a phase file explicitly says to do it.

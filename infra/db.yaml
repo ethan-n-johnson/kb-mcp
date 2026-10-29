@@ -1,0 +1,128 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: kb-mcp database stack (RDS PostgreSQL with pgvector, private subnets, reachable only from instances in DbClientSg). Nothing here is retained; the S3 export is the backup that survives.
+
+Parameters:
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedPattern: '^db\.[a-z0-9]+\.[a-z0-9]+$'
+    Description: RDS instance class. The probe (infra/probe-rds.sh) lists the classes this sandbox offers.
+
+  EngineVersion:
+    Type: String
+    Default: '16.9'
+    AllowedPattern: '^[0-9]+\.[0-9]+$'
+    Description: PostgreSQL version. 16.9 matches the pgvector/pgvector:pg16 image the tests use.
+
+  MultiAz:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: A standby in the other Availability Zone. Set false only if the sandbox refuses it.
+
+  DbPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    MaxLength: 64
+    AllowedPattern: '^[A-Za-z0-9]+$'
+    ConstraintDescription: 16 to 64 letters and digits.
+    Description: Master password. No default; infra/deploy.sh db reads it from KB_DB_PASSWORD.
+
+  StorageEncrypted:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Encrypt the storage. KMS is list only in the sandbox, so false is the fallback if the create is refused.
+
+Resources:
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: kb-mcp database, private subnets in two Availability Zones
+      SubnetIds:
+        - !ImportValue kb-PrivateSubnetA
+        - !ImportValue kb-PrivateSubnetB
+      Tags:
+        - Key: Project
+          Value: kb-mcp
+
+  # Empty on purpose: it only marks the app instances. The app stack attaches it
+  # (phase 21) and DbSg lets exactly this group reach the database.
+  DbClientSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Attach to instances that may connect to the kb database
+      VpcId: !ImportValue kb-VpcId
+      Tags:
+        - Key: Name
+          Value: kb-db-client
+        - Key: Project
+          Value: kb-mcp
+
+  DbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL from kb-db-client only
+      VpcId: !ImportValue kb-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !GetAtt DbClientSg.GroupId
+          Description: PostgreSQL from instances in kb-db-client
+      Tags:
+        - Key: Name
+          Value: kb-db
+        - Key: Project
+          Value: kb-mcp
+
+  # A sandbox reset loses RDS anyway; the S3 export (phase 20) survives it.
+  # W1011: the password is a NoEcho parameter, not a dynamic reference, because the
+  # sandbox does not list Secrets Manager and the instances cannot read SSM.
+  Db:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - W1011
+    Properties:
+      Engine: postgres
+      EngineVersion: !Ref EngineVersion
+      DBInstanceClass: !Ref DbInstanceClass
+      DBName: kb
+      MasterUsername: kbadmin
+      MasterUserPassword: !Ref DbPassword
+      AllocatedStorage: '20'
+      StorageType: gp2
+      StorageEncrypted: !Ref StorageEncrypted
+      MultiAZ: !Ref MultiAz
+      PubliclyAccessible: false
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !GetAtt DbSg.GroupId
+      BackupRetentionPeriod: 1
+      DeletionProtection: false
+      Tags:
+        - Key: Project
+          Value: kb-mcp
+
+Outputs:
+  DbEndpoint:
+    Description: Database host name (private; reachable from DbClientSg only)
+    Value: !GetAtt Db.Endpoint.Address
+    Export:
+      Name: kb-DbEndpoint
+  DbPort:
+    Description: Database port
+    Value: !GetAtt Db.Endpoint.Port
+    Export:
+      Name: kb-DbPort
+  DbClientSg:
+    Description: Security group the app instances attach to reach the database
+    Value: !GetAtt DbClientSg.GroupId
+    Export:
+      Name: kb-DbClientSg

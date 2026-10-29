@@ -221,7 +221,17 @@ The sandbox gives you temporary credentials that stop working when the lab sessi
    infra/up.sh
    ```
 
-   The first time, create `~/.config/kb-mcp/up.env` with one line, `KB_ALERT_EMAIL=you@example.com` (that folder is outside the repo). `up.sh` deploys `kb-network` and `kb-data`, uploads the write tokens (from `~/.config/kb-mcp/write-tokens`, generated there on the first run; open that file to copy them), uploads your saved database snapshot if the bucket has none, builds and uploads the image unless the bucket already has it for the current commit, looks up the CloudFront prefix list and deploys `kb-app`. On an empty account this takes about 20 to 30 minutes (image upload, NAT gateway, CloudFront). Confirm the SNS email again after a new account.
+   The first time, create `~/.config/kb-mcp/up.env` with one line, `KB_ALERT_EMAIL=you@example.com` (that folder is outside the repo). `up.sh` deploys `kb-network` and `kb-data`, uploads the write tokens (from `~/.config/kb-mcp/write-tokens`, generated there on the first run; open that file to copy them), uploads your saved database snapshot if the bucket has none, deploys `kb-db` (RDS PostgreSQL) and stores its connection URL at `s3://<bucket>/config/database-url`, builds and uploads the image unless the bucket already has it for the current commit, looks up the CloudFront prefix list and deploys `kb-app`. On an empty account this takes about 30 to 55 minutes (image upload, NAT gateway, CloudFront, and **`kb-db` takes 10 to 25 minutes on the first deploy**; Multi-AZ is the slow end). Confirm the SNS email again after a new account.
+
+   `up.sh` creates `~/.config/kb-mcp/db-password` on the first run (32 random letters and digits, mode 600) and never prints it. Keep that file: `kb-db` is created with it, and a later deploy with a different password would change the database's master password. If you lose the file while `kb-db` exists, delete `kb-db` (after an export, phase 20) and let `up.sh` generate a new one.
+
+   To see what RDS the sandbox allows (versions, instance classes, Multi-AZ, quotas, whether a DB subnet group can be created), run the read-only probe once `kb-network` exists:
+
+   ```bash
+   infra/probe-rds.sh --try-subnet-group
+   ```
+
+   Without `--try-subnet-group` it creates nothing. With it, it creates and deletes one free DB subnet group in the `kb-network` private subnets.
 6. **Before the session ends**, save the knowledge base so the next account can restore it:
 
    ```bash

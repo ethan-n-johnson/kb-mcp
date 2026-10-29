@@ -32,6 +32,7 @@ DEPLOY = INFRA / "deploy.sh"
 PUSH = INFRA / "push-image.sh"
 TEARDOWN = INFRA / "teardown-app.sh"
 UP = INFRA / "up.sh"
+PROBE = INFRA / "probe-rds.sh"
 
 
 # --- template loading ---------------------------------------------------------------------
@@ -145,13 +146,13 @@ def _shellcheck() -> str | None:
 def test_rendered_user_data_and_scripts_pass_shellcheck(resources: dict[str, Any], tmp_path: Path) -> None:
     script = tmp_path / "user-data.sh"
     script.write_text(render_user_data(resources), encoding="utf-8")
-    cmd = [_shellcheck() or "", "-s", "bash", str(script), str(SCRIPT), str(DEPLOY), str(PUSH), str(TEARDOWN), str(UP)]
+    cmd = [_shellcheck() or "", "-s", "bash", str(script), str(SCRIPT), str(DEPLOY), str(PUSH), str(TEARDOWN), str(UP), str(PROBE)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout
 
 
 def test_shell_scripts_are_executable_and_have_no_trailing_junk() -> None:
-    for path in (SCRIPT, DEPLOY, PUSH, TEARDOWN, UP):
+    for path in (SCRIPT, DEPLOY, PUSH, TEARDOWN, UP, PROBE):
         assert path.stat().st_mode & stat.S_IXUSR, f"{path.name} is not executable"
         assert path.read_text(encoding="utf-8").startswith("#!/usr/bin/env bash\n")
 
@@ -927,10 +928,13 @@ def test_no_em_or_en_dashes_in_files_from_these_phases() -> None:
     paths = [
         INFRA / "app.yaml",
         INFRA / "data.yaml",
+        INFRA / "db.yaml",
         INFRA / "network.yaml",
         DEPLOY,
         PUSH,
         TEARDOWN,
+        UP,
+        PROBE,
         SCRIPT,
         ROOT / "kb" / "backup.py",
         ROOT / "kb" / "metrics.py",
@@ -965,11 +969,17 @@ case "$1 $2" in
   "iam list-instance-profiles") echo "EMR_EC2_DefaultRole myS3Role" ;;
   "cloudformation describe-stacks")
     f="$state/stack-$(arg --stack-name "$@")"; [ -f "$f" ] || exit 254; cat "$f" ;;
-  "cloudformation list-exports") [ -f "$state/stack-kb-data" ] && echo kb-bucket || echo None ;;
+  "cloudformation list-exports")
+    case "$*" in
+      *kb-DbEndpoint*) [ -f "$state/stack-kb-db" ] && echo kb-db.example.us-east-1.rds.amazonaws.com || echo None ;;
+      *) [ -f "$state/stack-kb-data" ] && echo kb-bucket || echo None ;;
+    esac ;;
   "cloudformation delete-stack") rm -f "$state/stack-$(arg --stack-name "$@")" ;;
   "s3api head-object") key=$(arg --key "$@"); [ -f "$state/obj-${{key//\//_}}" ] || exit 254 ;;
   "s3 cp")
     src=$3; dst=$4
+    if [ "$src" = "-" ]; then key=${{dst#s3://*/}}; cat > "$state/obj-${{key//\//_}}"; exit 0; fi
+    if [ "$dst" = "-" ]; then key=${{src#s3://*/}}; cat "$state/obj-${{key//\//_}}" || exit 1; exit 0; fi
     case "$dst" in
       s3://*) key=${{dst#s3://*/}}; cp "$src" "$state/obj-${{key//\//_}}" ;;
       *) key=${{src#s3://*/}}; cp "$state/obj-${{key//\//_}}" "$dst" ;;
@@ -982,6 +992,7 @@ exit 0
 DEPLOY_UP_STUB = r"""
 echo "deploy.sh $* profile=$KB_INSTANCE_PROFILE pl=${{KB_CLOUDFRONT_PREFIX_LIST_ID:-}} email=${{KB_ALERT_EMAIL:-}}" >> {log}
 echo CREATE_COMPLETE > "{state}/stack-kb-$1"
+if [ "$1" = db ]; then printf '%s' "$KB_DB_PASSWORD" > "{state}/seen-db-password"; fi
 """
 
 PUSH_UP_STUB = r"""
@@ -1032,7 +1043,7 @@ def test_up_from_an_empty_account_deploys_everything_in_order(up_env: dict[str, 
     result = run_up(up_env)
     assert result.returncode == 0, result.stderr
     steps = [c.split()[0] + " " + c.split()[1] for c in up_calls(up_env) if not c.startswith("aws ")]
-    assert steps == ["deploy.sh network", "deploy.sh data", "push-image.sh --build", "deploy.sh app"]
+    assert steps == ["deploy.sh network", "deploy.sh data", "deploy.sh db", "push-image.sh --build", "deploy.sh app"]
     app = next(c for c in up_calls(up_env) if c.startswith("deploy.sh app"))
     assert "profile=myS3Role" in app and "pl=pl-0123456789abcdef0" in app
     assert "email=me@example.com" in app
@@ -1069,7 +1080,8 @@ def test_up_never_overwrites_tokens_or_a_snapshot_already_in_the_bucket(up_env: 
     assert (up_env["state"] / "obj-config_write-tokens").read_text(encoding="utf-8") == "live"
     assert (up_env["state"] / "obj-snapshots_kb-latest.db.gz").read_text(encoding="utf-8") == "live db"
     assert not (up_env["config"] / "write-tokens").exists()  # nothing generated
-    assert not [c for c in up_calls(up_env) if c.startswith("aws s3 cp")]
+    # Only the database URL is written (the db step); tokens and snapshot are untouched.
+    assert not [c for c in up_calls(up_env) if c.startswith("aws s3 cp") and "database-url" not in c]
 
 
 def test_up_skips_the_build_when_the_image_for_the_commit_is_uploaded(up_env: dict[str, Path]) -> None:
@@ -1163,3 +1175,227 @@ def test_user_data_passes_the_cloudfront_address_for_upload_links(resources: dic
     template, variables = user_data_parts(resources)
     assert variables["PublicHost"] == {"Fn::GetAtt": ["Distribution", "DomainName"]}
     assert "-e KB_PUBLIC_URL=https://VALUE_PUBLICHOST" in render_user_data(resources)
+
+
+# --- infra/db.yaml (phase 19) -------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def db() -> dict[str, Any]:
+    return load("db.yaml")
+
+
+def test_db_template_passes_cfn_lint() -> None:
+    lint = shutil.which("cfn-lint") or str(ROOT / ".venv" / "bin" / "cfn-lint")
+    if not Path(lint).exists():
+        pytest.skip("cfn-lint is not installed")
+    result = subprocess.run([lint, str(INFRA / "db.yaml")], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_db_security_group_allows_only_the_client_group_on_5432(db: dict[str, Any]) -> None:
+    resources = db["Resources"]
+    rule = resources["DbSg"]["Properties"]["SecurityGroupIngress"]
+    assert len(rule) == 1
+    assert rule[0]["IpProtocol"] == "tcp" and rule[0]["FromPort"] == rule[0]["ToPort"] == 5432
+    assert rule[0]["SourceSecurityGroupId"] == {"Fn::GetAtt": ["DbClientSg", "GroupId"]}
+    assert not {"CidrIp", "CidrIpv6", "SourcePrefixListId"} & set(rule[0])
+    # No ingress rule is added anywhere else.
+    assert not of_type(resources, "AWS::EC2::SecurityGroupIngress")
+    assert set(of_type(resources, "AWS::EC2::SecurityGroup")) == {"DbSg", "DbClientSg"}
+
+
+def test_db_client_group_is_empty(db: dict[str, Any]) -> None:
+    props = db["Resources"]["DbClientSg"]["Properties"]
+    assert "SecurityGroupIngress" not in props and "SecurityGroupEgress" not in props
+
+
+def test_db_instance_settings(db: dict[str, Any]) -> None:
+    instance = db["Resources"]["Db"]
+    props = instance["Properties"]
+    assert instance["DeletionPolicy"] == "Delete" and instance["UpdateReplacePolicy"] == "Delete"
+    assert props["Engine"] == "postgres"
+    assert props["DBName"] == "kb" and props["MasterUsername"] == "kbadmin"
+    assert props["AllocatedStorage"] == "20" and props["StorageType"] == "gp2"
+    assert props["PubliclyAccessible"] is False
+    assert props["MultiAZ"] == {"Ref": "MultiAz"}
+    assert props["StorageEncrypted"] == {"Ref": "StorageEncrypted"}
+    assert props["BackupRetentionPeriod"] == 1 and props["DeletionProtection"] is False
+    assert props["VPCSecurityGroups"] == [{"Fn::GetAtt": ["DbSg", "GroupId"]}]
+    assert props["MasterUserPassword"] == {"Ref": "DbPassword"}
+
+
+def test_db_parameters(db: dict[str, Any]) -> None:
+    params = db["Parameters"]
+    assert set(params) == {"DbInstanceClass", "EngineVersion", "MultiAz", "DbPassword", "StorageEncrypted"}
+    password = params["DbPassword"]
+    assert password["NoEcho"] is True and "Default" not in password
+    assert (password["MinLength"], password["MaxLength"]) == (16, 64)
+    pattern = re.compile(password["AllowedPattern"])
+    assert pattern.fullmatch("A" * 16) and pattern.fullmatch("a1" * 32)
+    assert not pattern.fullmatch("p@ss" * 8) and not pattern.fullmatch("")
+    assert (params["DbInstanceClass"]["Default"], params["EngineVersion"]["Default"]) == ("db.t3.micro", "16.9")
+    assert params["MultiAz"]["Default"] == "true" and params["MultiAz"]["AllowedValues"] == ["true", "false"]
+    assert params["StorageEncrypted"]["Default"] == "true"
+
+
+def test_db_stack_imports_what_the_network_stack_exports(db: dict[str, Any]) -> None:
+    network_exports = {o["Export"]["Name"] for o in load("network.yaml")["Outputs"].values()}
+    imports: set[str] = set()
+    for node in walk(db["Resources"]):
+        if isinstance(node, dict) and "Fn::ImportValue" in node:
+            imports.add(node["Fn::ImportValue"])
+    assert imports == {"kb-PrivateSubnetA", "kb-PrivateSubnetB", "kb-VpcId"}
+    assert imports <= network_exports
+    subnets = db["Resources"]["DbSubnetGroup"]["Properties"]["SubnetIds"]
+    assert subnets == [{"Fn::ImportValue": "kb-PrivateSubnetA"}, {"Fn::ImportValue": "kb-PrivateSubnetB"}]
+
+
+def test_db_outputs_and_exports(db: dict[str, Any]) -> None:
+    exports = {name: o["Export"]["Name"] for name, o in db["Outputs"].items()}
+    assert exports == {"DbEndpoint": "kb-DbEndpoint", "DbPort": "kb-DbPort", "DbClientSg": "kb-DbClientSg"}
+
+
+def test_no_password_is_written_in_the_repo_templates_or_scripts() -> None:
+    text = (INFRA / "db.yaml").read_text(encoding="utf-8")
+    assert "MasterUserPassword: !Ref DbPassword" in text
+    for path in (INFRA / "app.yaml", INFRA / "db.yaml"):
+        assert "kbadmin:" not in path.read_text(encoding="utf-8"), path.name
+
+
+# --- deploy.sh db -------------------------------------------------------------------------
+
+DB_PASSWORD = "Abcd1234Efgh5678Ijkl9012Mnop3456"
+
+
+def test_deploy_db_needs_the_password(stub_bin: Path) -> None:
+    for env in ({}, {"KB_DB_PASSWORD": ""}):
+        result = run_script(DEPLOY, ["db"], stub_bin, env)
+        assert result.returncode == 2 and "KB_DB_PASSWORD" in result.stderr and "is not set" in result.stderr
+    assert calls(stub_bin) == []  # failed before linting or calling AWS
+
+
+def test_deploy_db_lints_validates_then_deploys_with_the_password_only(stub_bin: Path) -> None:
+    result = run_script(DEPLOY, ["db"], stub_bin, {"KB_DB_PASSWORD": DB_PASSWORD})
+    assert result.returncode == 0, result.stderr
+    order = calls(stub_bin)
+    assert order[0].startswith("cfn-lint") and order[0].endswith("db.yaml")
+    assert "validate-template" in order[1] and "db.yaml" in order[1]
+    deploy = order[2]
+    assert "--stack-name kb-db" in deploy and "--no-fail-on-empty-changeset" in deploy
+    assert deploy.split("--parameter-overrides", 1)[1].split() == [f"DbPassword={DB_PASSWORD}"]
+    assert DB_PASSWORD not in result.stdout + result.stderr
+
+
+def test_deploy_db_passes_the_overrides_that_are_set(stub_bin: Path) -> None:
+    env = {
+        "KB_DB_PASSWORD": DB_PASSWORD, "KB_DB_CLASS": "db.t3.small", "KB_DB_VERSION": "16.9",
+        "KB_DB_MULTI_AZ": "false", "KB_DB_ENCRYPTED": "false",
+    }
+    run_script(DEPLOY, ["db"], stub_bin, env)
+    deploy = next(c for c in calls(stub_bin) if "cloudformation deploy" in c)
+    assert deploy.split("--parameter-overrides", 1)[1].split() == [
+        f"DbPassword={DB_PASSWORD}", "DbInstanceClass=db.t3.small", "EngineVersion=16.9",
+        "MultiAz=false", "StorageEncrypted=false",
+    ]
+
+
+def test_deploy_db_rejects_extra_arguments(stub_bin: Path) -> None:
+    result = run_script(DEPLOY, ["db", "extra"], stub_bin, {"KB_DB_PASSWORD": DB_PASSWORD})
+    assert result.returncode == 2 and calls(stub_bin) == []
+
+
+# --- infra/up.sh, database step -----------------------------------------------------------
+
+DB_ENDPOINT = "kb-db.example.us-east-1.rds.amazonaws.com"
+
+
+def test_up_generates_a_private_password_and_deploys_kb_db_with_it(up_env: dict[str, Path]) -> None:
+    result = run_up(up_env)
+    assert result.returncode == 0, result.stderr
+    password_file = up_env["config"] / "db-password"
+    password = password_file.read_text(encoding="utf-8").strip()
+    assert re.fullmatch(r"[A-Za-z0-9]{32}", password)
+    assert stat.S_IMODE(password_file.stat().st_mode) == 0o600
+    # deploy.sh got it through the environment, never on its command line.
+    assert (up_env["state"] / "seen-db-password").read_text(encoding="utf-8") == password
+    assert not [c for c in up_calls(up_env) if password in c]
+    assert password not in result.stdout + result.stderr
+
+
+def test_up_stores_the_database_url_in_s3_with_sse_and_never_prints_it(up_env: dict[str, Path]) -> None:
+    result = run_up(up_env)
+    assert result.returncode == 0, result.stderr
+    password = (up_env["config"] / "db-password").read_text(encoding="utf-8").strip()
+    url = (up_env["state"] / "obj-config_database-url").read_text(encoding="utf-8")
+    assert url == f"postgresql://kbadmin:{password}@{DB_ENDPOINT}:5432/kb?sslmode=require"  # no newline
+    upload = next(c for c in up_calls(up_env) if c.startswith("aws s3 cp - ") and "config/database-url" in c)
+    assert "--sse AES256" in upload
+    shown = result.stdout + result.stderr
+    assert password not in shown and "postgresql://" not in shown
+    assert DB_ENDPOINT in shown  # the host name alone is not a secret
+
+
+def test_up_deploys_kb_db_after_kb_data_and_before_the_image(up_env: dict[str, Path]) -> None:
+    run_up(up_env)
+    order = up_calls(up_env)
+    index = {k: next(i for i, c in enumerate(order) if c.startswith(k))
+             for k in ("deploy.sh data", "deploy.sh db", "push-image.sh", "deploy.sh app")}
+    url = next(i for i, c in enumerate(order) if c.startswith("aws s3 cp - ") and "database-url" in c)
+    assert index["deploy.sh data"] < index["deploy.sh db"] < url < index["push-image.sh"] < index["deploy.sh app"]
+
+
+def test_up_reuses_an_existing_password_file(up_env: dict[str, Path]) -> None:
+    (up_env["config"] / "db-password").write_text("Zz9" * 8 + "\n", encoding="utf-8")
+    result = run_up(up_env)
+    assert result.returncode == 0, result.stderr
+    assert (up_env["config"] / "db-password").read_text(encoding="utf-8") == "Zz9" * 8 + "\n"
+    assert (up_env["state"] / "seen-db-password").read_text(encoding="utf-8") == "Zz9" * 8
+
+
+@pytest.mark.parametrize("bad", ["short", "has space and symbols !!!!!!!!!!!!", "x" * 65])
+def test_up_refuses_a_password_file_the_template_would_reject(up_env: dict[str, Path], bad: str) -> None:
+    (up_env["config"] / "db-password").write_text(bad + "\n", encoding="utf-8")
+    result = run_up(up_env)
+    assert result.returncode == 1 and "16 to 64 letters and digits" in result.stderr
+    assert bad not in result.stdout + result.stderr
+    assert not [c for c in up_calls(up_env) if c.startswith(("deploy.sh db", "deploy.sh app"))]
+
+
+def test_up_twice_leaves_the_password_and_the_url_alone(up_env: dict[str, Path]) -> None:
+    run_up(up_env)
+    password = (up_env["config"] / "db-password").read_text(encoding="utf-8")
+    first = len(up_calls(up_env))
+    result = run_up(up_env)
+    assert result.returncode == 0, result.stderr
+    assert (up_env["config"] / "db-password").read_text(encoding="utf-8") == password
+    second = up_calls(up_env)[first:]
+    assert any(c.startswith("deploy.sh db") for c in second)  # deploy.sh itself reports "no changes"
+    assert not [c for c in second if c.startswith("aws s3 cp - ")]  # URL already current
+    assert "database URL already in" in result.stderr
+
+
+def test_up_rewrites_the_url_when_the_endpoint_changes(up_env: dict[str, Path]) -> None:
+    (up_env["state"] / "obj-config_database-url").write_text("postgresql://old", encoding="utf-8")
+    result = run_up(up_env)
+    assert result.returncode == 0, result.stderr
+    assert DB_ENDPOINT in (up_env["state"] / "obj-config_database-url").read_text(encoding="utf-8")
+
+
+def test_up_deletes_a_db_stack_left_in_rollback_complete(up_env: dict[str, Path]) -> None:
+    (up_env["state"] / "stack-kb-db").write_text("ROLLBACK_COMPLETE\n", encoding="utf-8")
+    result = run_up(up_env)
+    assert result.returncode == 0, result.stderr
+    order = up_calls(up_env)
+    delete = next(i for i, c in enumerate(order) if "delete-stack" in c and "kb-db" in c)
+    assert delete < next(i for i, c in enumerate(order) if c.startswith("deploy.sh db"))
+
+
+def test_up_script_never_puts_the_password_or_url_in_a_message() -> None:
+    """The variables may appear in assignments, a pipe to S3 and a comparison, but not in output."""
+    leaks = [
+        f"line {n}: {line.strip()}"
+        for n, line in enumerate((UP).read_text(encoding="utf-8").splitlines(), 1)
+        if re.match(r"\s*(echo|step|die|printf\b.*>&2)", line) and re.search(r"\$\{?(KB_)?DB_(PASSWORD|URL)\b|CURRENT_URL", line)
+    ]
+    assert leaks == []

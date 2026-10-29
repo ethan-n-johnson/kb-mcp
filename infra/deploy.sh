@@ -3,10 +3,22 @@
 #
 #   infra/deploy.sh network
 #   infra/deploy.sh data
+#   infra/deploy.sh db
 #   infra/deploy.sh app <ImageTag>
 #
 # Each run lints the template, validates it with CloudFormation, then deploys it
-# as stack kb-<name>. Deploy order: network, then data, then app.
+# as stack kb-<name>. Deploy order: network, data, db, then app.
+#
+# The db stack needs the master password in the environment (the script stops with
+# an error if it is missing; it is never printed):
+#   KB_DB_PASSWORD                16 to 64 letters and digits (infra/up.sh keeps it
+#                                 in ~/.config/kb-mcp/db-password)
+# and takes four optional values, passed only when set (the template defaults are
+# db.t3.micro, 16.9, Multi-AZ on, encrypted):
+#   KB_DB_CLASS                   DbInstanceClass
+#   KB_DB_VERSION                 EngineVersion
+#   KB_DB_MULTI_AZ                true or false (MultiAz)
+#   KB_DB_ENCRYPTED               true or false (StorageEncrypted)
 #
 # The app stack needs two values from the environment (the script stops with an
 # error if one is missing):
@@ -31,9 +43,10 @@ TAGS="Project=kb-mcp"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
-  echo "usage: infra/deploy.sh network|data|app [ImageTag]" >&2
+  echo "usage: infra/deploy.sh network|data|db|app [ImageTag]" >&2
   echo "  app requires an ImageTag (the tag pushed by infra/push-image.sh)" >&2
   echo "  app also needs KB_CLOUDFRONT_PREFIX_LIST_ID and KB_ALERT_EMAIL in the environment" >&2
+  echo "  db needs KB_DB_PASSWORD in the environment" >&2
   exit 2
 }
 
@@ -101,6 +114,16 @@ case "$1" in
   network | data)
     [ $# -eq 1 ] || usage
     deploy_stack "$1"
+    ;;
+  db)
+    [ $# -eq 1 ] || usage
+    require_env KB_DB_PASSWORD "the database master password (16 to 64 letters and digits; infra/up.sh keeps it in ~/.config/kb-mcp/db-password)"
+    db_params=("DbPassword=$KB_DB_PASSWORD")
+    [ -z "${KB_DB_CLASS:-}" ] || db_params+=("DbInstanceClass=$KB_DB_CLASS")
+    [ -z "${KB_DB_VERSION:-}" ] || db_params+=("EngineVersion=$KB_DB_VERSION")
+    [ -z "${KB_DB_MULTI_AZ:-}" ] || db_params+=("MultiAz=$KB_DB_MULTI_AZ")
+    [ -z "${KB_DB_ENCRYPTED:-}" ] || db_params+=("StorageEncrypted=$KB_DB_ENCRYPTED")
+    deploy_stack db --parameter-overrides "${db_params[@]}"
     ;;
   app)
     [ $# -eq 2 ] || usage

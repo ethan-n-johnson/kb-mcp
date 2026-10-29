@@ -15,10 +15,13 @@
 #      local tokens file, or generate new tokens into it first. Never printed.
 #   4. Database: if the bucket has no snapshot and a saved one exists locally,
 #      upload it, so the app restores it at boot.
-#   5. Image: build and upload it (infra/push-image.sh --build) unless the bucket
+#   5. Database: generate the master password file if missing, deploy kb-db with it
+#      (10 to 25 minutes the first time; Multi-AZ takes longer), and store the
+#      connection URL in s3://<bucket>/config/database-url. Never printed.
+#   6. Image: build and upload it (infra/push-image.sh --build) unless the bucket
 #      already has the image for the current commit. Uncommitted changes always
 #      rebuild.
-#   6. Look up the CloudFront prefix list, delete a kb-app stack left in
+#   7. Look up the CloudFront prefix list, delete a kb-app stack left in
 #      ROLLBACK_COMPLETE, and deploy kb-app (infra/deploy.sh app <tag>).
 #
 # Local files, all outside the repo (KB_CONFIG_DIR, default ~/.config/kb-mcp):
@@ -26,7 +29,12 @@
 #                      KB_ALERT_EMAIL=you@example.com          (required)
 #                      KB_INSTANCE_PROFILE=myS3Role            (optional)
 #                      KB_METRICS_MODE, KB_EXTENSION_ORIGIN     (optional, see deploy.sh)
+#                      KB_DB_CLASS, KB_DB_VERSION, KB_DB_MULTI_AZ, KB_DB_ENCRYPTED
+#                                                               (optional, see deploy.sh)
 #   write-tokens     name:secret,name:secret (created on the first run if missing)
+#   db-password      the database master password, 32 letters and digits (created
+#                    on the first run if missing, mode 600). Lose it and the next
+#                    kb-db deploy fails; delete kb-db first, then the file.
 #   kb-latest.db.gz  the snapshot saved by "infra/up.sh save"
 set -euo pipefail
 
@@ -35,8 +43,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_DIR="${KB_CONFIG_DIR:-$HOME/.config/kb-mcp}"
 CONFIG_FILE="$CONFIG_DIR/up.env"
 TOKENS_FILE="$CONFIG_DIR/write-tokens"
+DB_PASSWORD_FILE="$CONFIG_DIR/db-password"
 SNAPSHOT_FILE="$CONFIG_DIR/kb-latest.db.gz"
 TOKENS_KEY="config/write-tokens"
+DB_URL_KEY="config/database-url"
 SNAPSHOT_KEY="snapshots/kb-latest.db.gz"
 
 step() { echo "==> $*" >&2; }
@@ -171,7 +181,49 @@ else
   step "no database snapshot in the bucket or saved locally; the app starts empty"
 fi
 
-# --- 5. image ------------------------------------------------------------------------
+# --- 5. database --------------------------------------------------------------------
+# The password lives in a private file outside the repo. It is passed to deploy.sh
+# through the environment of that one command and to S3 through a pipe; it is never
+# printed, logged or written anywhere else.
+if [ ! -s "$DB_PASSWORD_FILE" ]; then
+  mkdir -p "$CONFIG_DIR"
+  (
+    umask 077
+    python3 -c 'import secrets, string; print("".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32)))' \
+      > "$DB_PASSWORD_FILE"
+  )
+  step "generated a new database password in $DB_PASSWORD_FILE (not printed)"
+fi
+DB_PASSWORD="$(< "$DB_PASSWORD_FILE")"
+case "$DB_PASSWORD" in
+  *[!A-Za-z0-9]* | "") die "$DB_PASSWORD_FILE must hold 16 to 64 letters and digits only" ;;
+esac
+[ "${#DB_PASSWORD}" -ge 16 ] && [ "${#DB_PASSWORD}" -le 64 ] \
+  || die "$DB_PASSWORD_FILE must hold 16 to 64 letters and digits only"
+
+step "deploying kb-db (the first deploy takes 10 to 25 minutes)"
+ready_stack kb-db
+KB_DB_PASSWORD="$DB_PASSWORD" "$ROOT/infra/deploy.sh" db
+
+DB_ENDPOINT="$(aws cloudformation list-exports --region "$REGION" \
+  --query "Exports[?Name=='kb-DbEndpoint'].Value" --output text)"
+if [ -z "$DB_ENDPOINT" ] || [ "$DB_ENDPOINT" = "None" ]; then
+  die "export kb-DbEndpoint not found; did the kb-db stack finish?"
+fi
+step "database endpoint $DB_ENDPOINT"
+
+# Rewrite the URL only when it changed: the bucket is versioned, so every write keeps a version.
+DB_URL="postgresql://kbadmin:${DB_PASSWORD}@${DB_ENDPOINT}:5432/kb?sslmode=require"
+CURRENT_URL="$(aws s3 cp "s3://$BUCKET/$DB_URL_KEY" - --region "$REGION" 2> /dev/null || true)"
+if [ "$CURRENT_URL" = "$DB_URL" ]; then
+  step "database URL already in s3://$BUCKET/$DB_URL_KEY"
+else
+  printf '%s' "$DB_URL" | aws s3 cp - "s3://$BUCKET/$DB_URL_KEY" --sse AES256 --region "$REGION" > /dev/null
+  step "stored the database URL in s3://$BUCKET/$DB_URL_KEY"
+fi
+unset DB_PASSWORD DB_URL CURRENT_URL
+
+# --- 6. image ------------------------------------------------------------------------
 cd "$ROOT"
 TAG="$(git rev-parse --short HEAD)"
 if [ -z "$(git status --porcelain)" ] && object_exists "images/kb-mcp-$TAG.tar.gz"; then
@@ -181,7 +233,7 @@ else
 fi
 step "image tag $TAG"
 
-# --- 6. app stack ---------------------------------------------------------------------
+# --- 7. app stack ---------------------------------------------------------------------
 if [ -z "${KB_CLOUDFRONT_PREFIX_LIST_ID:-}" ]; then
   KB_CLOUDFRONT_PREFIX_LIST_ID="$(aws ec2 describe-managed-prefix-lists --region "$REGION" \
     --filters Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing \
