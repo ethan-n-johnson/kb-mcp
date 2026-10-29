@@ -1,5 +1,11 @@
 """SQLite connection helpers, schema, FTS5 triggers and the commit hook.
 
+This is the SQLite dialect's schema module. The PostgreSQL dialect lives in
+`kb/store/` (`schema_pg.sql`, `postgres.py`); `transaction()` and
+`init_schema()` here work on either kind of connection, and the SQLite
+connection class also implements the rest of the `Store` interface
+(`kb/store/base.py`: `insert`, `fetchone`, `fetchall`, `fts_rows`, ...).
+
 The database lives on the instance root volume in production (`/data/kb.db`)
 and is snapshotted to S3 (`kb/snapshot.py`). The rollback journal
 (`journal_mode=DELETE`) is used and WAL is never enabled: one self-contained
@@ -105,9 +111,36 @@ class _Connection(sqlite3.Connection):
     too rarely.
     """
 
+    dialect = "sqlite"
     _seen_changes: int = 0
     _key: str = ""
     _quiet: bool = False
+
+    # --- the rest of the Store interface (kb/store/base.py) ---
+
+    def fetchone(self, sql: str, params: Any = ()) -> Any:
+        return self.execute(sql, params).fetchone()
+
+    def fetchall(self, sql: str, params: Any = ()) -> list[Any]:
+        return self.execute(sql, params).fetchall()
+
+    def insert(self, sql: str, params: Any = ()) -> int:
+        """Run an `INSERT` and return the new row's id."""
+        return int(self.execute(sql, params).lastrowid or 0)
+
+    def transaction(self) -> Any:
+        """Context manager: `BEGIN IMMEDIATE`, then commit, or roll back on an exception."""
+        return _sqlite_transaction(self)
+
+    def fts_rows(self, terms: list[str], tags: list[str], limit: int, with_snippet: bool) -> list[Any]:
+        from kb.store import sqlite as dialect
+
+        return dialect.fts_rows(self, terms, tags, limit, with_snippet)
+
+    def fts_covers(self, terms: list[str], chunk_id: int) -> bool:
+        from kb.store import sqlite as dialect
+
+        return dialect.fts_covers(self, terms, chunk_id)
 
     def _after(self, sql: object = "") -> None:
         """Compare `total_changes` with the last look; report a committed write."""
@@ -181,8 +214,18 @@ def connect(path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+def transaction(conn: Any) -> Any:
+    """Run a block in a write transaction on either kind of connection (a context manager).
+
+    Commits on success and rolls back on an exception. SQLite: `BEGIN IMMEDIATE`.
+    PostgreSQL: a transaction guarded by an advisory lock (`PostgresStore.transaction`).
+    """
+    method = getattr(conn, "transaction", None)
+    return method() if method is not None else _sqlite_transaction(conn)
+
+
 @contextmanager
-def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+def _sqlite_transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     """Run a block inside `BEGIN IMMEDIATE`; commit on success, roll back on error."""
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -289,14 +332,19 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
                 raise
 
 
-def init_schema(conn: sqlite3.Connection) -> None:
+def init_schema(conn: Any) -> None:
     """Create all tables, indexes, the FTS5 table and its triggers (idempotent).
+
+    On a PostgreSQL store this re-applies `kb/store/schema_pg.sql` instead.
 
     Also upgrades databases created by earlier phases (see `_add_missing_columns`).
     Creating the FTS5 tables inserts a few internal rows; those are schema setup,
     not data, so they are not reported to the commit listeners (an empty database
     must not become a snapshot just because the app started on it).
     """
+    if getattr(conn, "dialect", "sqlite") == "postgres":
+        conn.ensure_schema()
+        return
     quiet = isinstance(conn, _Connection)
     if quiet:
         conn._quiet = True  # type: ignore[attr-defined]

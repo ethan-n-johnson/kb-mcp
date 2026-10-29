@@ -15,7 +15,6 @@ checks and writes all happen in `kb.service`.
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 from typing import Callable
 
@@ -29,6 +28,7 @@ from kb.ingest.convert import detect_format
 from kb.schemas import UpdateResult, UploadRequest, UploadResult
 from kb.search.state import SearchState
 from kb.ui_common import Conn, Search, page, ui_errors
+from kb.store import Store
 
 router = APIRouter()
 
@@ -50,7 +50,7 @@ class Source:
 
 def _finish(
     request: Request,
-    conn: sqlite3.Connection,
+    conn: Store,
     search: SearchState,
     actor: str,
     action: str,
@@ -89,7 +89,7 @@ def add_paste(
     tags: str = Form(""),
     action: str = Form("save"),
     candidate: int | None = Form(None),
-    conn: sqlite3.Connection = Conn,
+    conn: Store = Conn,
     search: SearchState = Search,
 ) -> HTMLResponse:
     """Store pasted Markdown, or act on a duplicate warning for it."""
@@ -116,7 +116,7 @@ def add_file(
     tags: str = Form(""),
     action: str = Form("save"),
     candidate: int | None = Form(None),
-    conn: sqlite3.Connection = Conn,
+    conn: Store = Conn,
     search: SearchState = Search,
 ) -> HTMLResponse:
     """Store an uploaded Markdown, HTML or PDF file, or act on a duplicate warning for it."""
@@ -150,7 +150,7 @@ def add_url(
     tags: str = Form(""),
     action: str = Form("save"),
     candidate: int | None = Form(None),
-    conn: sqlite3.Connection = Conn,
+    conn: Store = Conn,
     search: SearchState = Search,
 ) -> HTMLResponse:
     """Fetch and store a page, or act on a duplicate warning for it."""

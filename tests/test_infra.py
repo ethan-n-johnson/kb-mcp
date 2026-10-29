@@ -80,7 +80,7 @@ def of_type(resources: dict[str, Any], rtype: str) -> dict[str, Any]:
 # --- user data ----------------------------------------------------------------------------
 
 PSEUDO = {"AWS::Region": "us-east-1", "AWS::StackName": "kb-app"}
-PARAMETER_VALUES = {"ImageTag": "abc1234", "MetricsMode": "api", "ExtensionOrigin": ""}
+PARAMETER_VALUES = {"ImageTag": "abc1234", "MetricsMode": "api", "ExtensionOrigin": "", "DatabaseMode": "sqlite"}
 
 
 def user_data_parts(resources: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -94,10 +94,10 @@ def sub_variable_names(template: str) -> set[str]:
     return set(re.findall(r"\$\{(?!!)([^}]+)\}", template))
 
 
-def render_user_data(resources: dict[str, Any]) -> str:
+def render_user_data(resources: dict[str, Any], **parameters: str) -> str:
     """Render user data like Fn::Sub: `${Name}` is replaced, `${!X}` becomes `${X}`."""
     template, variables = user_data_parts(resources)
-    values = {name: f"VALUE_{name.upper()}" for name in variables} | PSEUDO | PARAMETER_VALUES
+    values = {name: f"VALUE_{name.upper()}" for name in variables} | PSEUDO | PARAMETER_VALUES | parameters
 
     def sub(match: re.Match[str]) -> str:
         return values[match.group(1)]
@@ -518,7 +518,7 @@ def test_no_efs_or_ecr_resource_remains_in_any_template() -> None:
 def test_no_efs_or_ecr_export_or_import_remains() -> None:
     exports: set[str] = set()
     imports: set[str] = set()
-    for name in ("network.yaml", "data.yaml", "app.yaml"):
+    for name in ("network.yaml", "data.yaml", "db.yaml", "app.yaml"):
         template = load(name)
         exports |= {o["Export"]["Name"] for o in template.get("Outputs", {}).values() if "Export" in o}
         imports |= {n["Fn::ImportValue"] for n in walk(template) if isinstance(n, dict) and "Fn::ImportValue" in n}
@@ -575,6 +575,53 @@ def test_user_data_restores_the_database_before_the_app_starts(resources: dict[s
     assert 'docker run --rm -v /data:/data -e KB_DB=/data/kb.db' in squashed
     assert f'"$IMAGE" {restore}' in squashed
     assert "--name kb" not in squashed.split(restore)[0].rsplit("docker run", 1)[1]
+
+
+# --- phase 20: DatabaseMode ------------------------------------------------------------------
+
+
+def test_database_mode_defaults_to_sqlite_and_allows_only_two_values(app: dict[str, Any]) -> None:
+    param = app["Parameters"]["DatabaseMode"]
+    assert (param["Default"], param["AllowedValues"]) == ("sqlite", ["sqlite", "postgres"])
+    assert app["Conditions"]["UsePostgres"] == {"Fn::Equals": [{"Ref": "DatabaseMode"}, "postgres"]}
+
+
+def test_postgres_mode_attaches_the_database_client_group_and_sqlite_mode_does_not(
+    resources: dict[str, Any],
+) -> None:
+    groups = resources["LaunchTemplate"]["Properties"]["LaunchTemplateData"]["NetworkInterfaces"][0]["Groups"]
+    condition, if_postgres, if_sqlite = groups["Fn::If"]
+    assert condition == "UsePostgres"
+    assert if_postgres == [{"Ref": "AppSg"}, {"Fn::ImportValue": "kb-DbClientSg"}]
+    assert if_sqlite == [{"Ref": "AppSg"}]
+
+
+def test_user_data_imports_the_snapshot_only_into_an_empty_postgres_database(resources: dict[str, Any]) -> None:
+    template, _ = user_data_parts(resources)
+    assert "DATABASE_MODE=${DatabaseMode}" in template
+    rendered = render_user_data(resources, DatabaseMode="postgres")
+    assert "DATABASE_MODE=postgres" in rendered
+    flat = re.sub(r"\s+", " ", rendered.replace("\\\n", ""))
+    assert "python -m kb.cli import-sqlite --from snapshots/kb-latest.db.gz --if-empty" in flat
+    assert "docker run --rm -e KB_BUCKET=VALUE_BUCKET -e AWS_REGION=us-east-1 -e KB_DATABASE_URL_SOURCE=s3" in flat
+    # postgres: import with retries and no restore; sqlite: restore only
+    branch = re.search(r'if \[ "\$DATABASE_MODE" = postgres \]; then\s+retry 5 15 import_db\s+DB_OPTS=\(-e KB_DATABASE_URL_SOURCE=s3\)\s+else\s+retry 5 15 restore_db\s+fi', rendered)
+    assert branch, "the boot must choose import_db or restore_db by DatabaseMode"
+    # Imported before the service container starts, so the app never sees an empty database.
+    assert rendered.index("retry 5 15 import_db") < rendered.index("docker run -d --name kb")
+
+
+def test_service_container_gets_the_url_source_only_through_db_opts(resources: dict[str, Any]) -> None:
+    rendered = render_user_data(resources).replace("\\\n", "")
+    run = next(ln for ln in rendered.splitlines() if ln.strip().startswith("docker run -d --name kb"))
+    assert '"${DB_OPTS[@]}"' in run and "KB_DATABASE_URL" not in run  # no URL, no password, in the script
+    assert "postgresql://" not in rendered  # the URL is read from S3 by the app
+
+
+def test_nightly_job_exports_in_postgres_mode(resources: dict[str, Any]) -> None:
+    rendered = render_user_data(resources)
+    assert "docker exec kb python -m kb.cli export-sqlite >> /var/log/kb-backup.log 2>&1" in rendered
+    assert "docker exec kb python -m kb.cli backup >> /var/log/kb-backup.log 2>&1" in rendered
 
 
 def test_service_container_has_a_stop_timeout_for_the_final_snapshot(resources: dict[str, Any]) -> None:
@@ -706,6 +753,7 @@ def test_deploy_app_passes_all_parameters_to_cloudformation(stub_bin: Path) -> N
         "MetricsMode=api",
         "InstanceProfileName=myS3Role",
         "ExtensionOrigin=",
+        "DatabaseMode=sqlite",
     ]
     assert any("DistributionDomainName" in c for c in calls(stub_bin))
 
@@ -734,6 +782,20 @@ def test_deploy_app_passes_the_extension_origin_when_set(stub_bin: Path) -> None
     run_script(DEPLOY, ["app", "abc1234"], stub_bin, env)
     deploy = next(c for c in calls(stub_bin) if "cloudformation deploy" in c)
     assert f"ExtensionOrigin=chrome-extension://{EXTENSION_ID}" in deploy.split()
+
+
+def test_deploy_app_passes_the_database_mode(stub_bin: Path) -> None:
+    env = {"KB_CLOUDFRONT_PREFIX_LIST_ID": "pl-1", "KB_ALERT_EMAIL": "me@example.com", "KB_DATABASE_MODE": "postgres"}
+    result = run_script(DEPLOY, ["app", "abc1234"], stub_bin, env)
+    assert result.returncode == 0, result.stderr
+    assert "DatabaseMode=postgres" in next(c for c in calls(stub_bin) if "cloudformation deploy" in c).split()
+
+
+def test_deploy_app_refuses_an_unknown_database_mode(stub_bin: Path) -> None:
+    env = {"KB_CLOUDFRONT_PREFIX_LIST_ID": "pl-1", "KB_ALERT_EMAIL": "me@example.com", "KB_DATABASE_MODE": "mysql"}
+    result = run_script(DEPLOY, ["app", "abc1234"], stub_bin, env)
+    assert result.returncode == 2 and "sqlite or postgres" in result.stderr
+    assert not any("cloudformation deploy" in c for c in calls(stub_bin))
 
 
 def test_deploy_data_and_network_need_neither_value(stub_bin: Path) -> None:
@@ -968,7 +1030,12 @@ case "$1 $2" in
   "iam get-instance-profile") [ -f "$state/no-profile" ] && exit 254; echo ok ;;
   "iam list-instance-profiles") echo "EMR_EC2_DefaultRole myS3Role" ;;
   "cloudformation describe-stacks")
-    f="$state/stack-$(arg --stack-name "$@")"; [ -f "$f" ] || exit 254; cat "$f" ;;
+    f="$state/stack-$(arg --stack-name "$@")"; [ -f "$f" ] || exit 254
+    case "$*" in
+      *DatabaseMode*) cat "$state/database-mode" 2>/dev/null; exit 0 ;;
+      *DistributionDomainName*) echo d111111abcdef8.cloudfront.net; exit 0 ;;
+    esac
+    cat "$f" ;;
   "cloudformation list-exports")
     case "$*" in
       *kb-DbEndpoint*) [ -f "$state/stack-kb-db" ] && echo kb-db.example.us-east-1.rds.amazonaws.com || echo None ;;
@@ -1156,6 +1223,70 @@ def test_up_save_downloads_the_snapshot(up_env: dict[str, Path]) -> None:
     assert result.returncode == 0, result.stderr
     assert (up_env["config"] / "kb-latest.db.gz").read_bytes() == b"latest db"
     assert not [c for c in up_calls(up_env) if c.startswith(("deploy.sh", "push-image.sh"))]
+
+
+# A stub curl: records its arguments and what arrived on stdin (the config that carries the token),
+# answers with the JSON of /api/admin/export, or fails when $state/curl-fails exists.
+CURL_UP_STUB = r"""
+echo "curl $*" >> {log}
+cat > "{state}/curl-stdin"
+[ -f "{state}/curl-fails" ] && {{ echo "curl: (22) The requested URL returned error: 502" >&2; exit 22; }}
+echo '{{"status":"exported","key":"snapshots/kb-latest.db.gz","docs":3,"chunks":9}}'
+"""
+
+
+def postgres_app(env: dict[str, Path], tokens: str | None = "temp:secretone,demo:secrettwo") -> None:
+    """Make the stub account look like kb-app runs in PostgreSQL mode, with a saved tokens file."""
+    state = env["state"]
+    (state / "stack-kb-data").write_text("CREATE_COMPLETE\n", encoding="utf-8")
+    (state / "stack-kb-app").write_text("CREATE_COMPLETE\n", encoding="utf-8")
+    (state / "database-mode").write_text("postgres\n", encoding="utf-8")
+    (state / "obj-snapshots_kb-latest.db.gz").write_bytes(b"exported db")
+    make_stub(env["bin"], "curl", CURL_UP_STUB.format(log=env["log"], state=state))
+    if tokens is not None:
+        (env["config"] / "write-tokens").write_text(tokens + "\n", encoding="utf-8")
+
+
+def test_up_save_in_postgres_mode_exports_first_then_downloads(up_env: dict[str, Path]) -> None:
+    postgres_app(up_env)
+    result = run_up(up_env, "save")
+    assert result.returncode == 0, result.stderr
+    curl = next(c for c in up_calls(up_env) if c.startswith("curl "))
+    assert "-X POST https://d111111abcdef8.cloudfront.net/api/admin/export" in curl
+    # The token goes in on stdin as a curl config, never as an argument or into any output.
+    assert (up_env["state"] / "curl-stdin").read_text(encoding="utf-8") == 'header = "Authorization: Bearer secretone"\n'
+    assert "secretone" not in curl + result.stdout + result.stderr
+    assert "export done" in result.stderr and '"docs":3' in result.stderr
+    assert (up_env["config"] / "kb-latest.db.gz").read_bytes() == b"exported db"
+    calls_list = up_calls(up_env)
+    export_at = next(i for i, c in enumerate(calls_list) if c.startswith("curl "))
+    download_at = next(i for i, c in enumerate(calls_list) if c.startswith("aws s3 cp"))
+    assert export_at < download_at
+
+
+def test_up_save_stops_when_the_export_fails_and_keeps_the_old_download(up_env: dict[str, Path]) -> None:
+    postgres_app(up_env)
+    (up_env["config"] / "kb-latest.db.gz").write_bytes(b"older saved copy")
+    (up_env["state"] / "curl-fails").write_text("", encoding="utf-8")
+    result = run_up(up_env, "save")
+    assert result.returncode == 1 and "the export failed" in result.stderr
+    assert (up_env["config"] / "kb-latest.db.gz").read_bytes() == b"older saved copy"
+    assert not [c for c in up_calls(up_env) if c.startswith("aws s3 cp")]
+
+
+def test_up_save_in_postgres_mode_needs_the_tokens_file(up_env: dict[str, Path]) -> None:
+    postgres_app(up_env, tokens=None)
+    result = run_up(up_env, "save")
+    assert result.returncode == 1 and "write-tokens" in result.stderr
+    assert not [c for c in up_calls(up_env) if c.startswith("curl ")]
+
+
+def test_up_save_in_sqlite_mode_never_calls_the_app(up_env: dict[str, Path]) -> None:
+    postgres_app(up_env)
+    (up_env["state"] / "database-mode").write_text("sqlite\n", encoding="utf-8")
+    result = run_up(up_env, "save")
+    assert result.returncode == 0, result.stderr
+    assert not [c for c in up_calls(up_env) if c.startswith("curl ")]
 
 
 def test_up_save_fails_clearly_without_a_snapshot(up_env: dict[str, Path]) -> None:

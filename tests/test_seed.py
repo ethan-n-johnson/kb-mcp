@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent
 HTML = (Path(__file__).parent / "fixtures" / "aws_like.html").read_bytes()
 BASE = "https://docs.example.com/guide/"
 
+pytestmark = pytest.mark.dual
+
 
 @pytest.fixture(autouse=True)
 def fake_dns(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -35,7 +37,8 @@ def fake_dns(monkeypatch: pytest.MonkeyPatch) -> None:
         try:
             ip = str(ipaddress.ip_address(host))
         except ValueError:
-            ip = "93.184.216.34"
+            # The test database (KB_TEST_DATABASE_URL) is on localhost; every other name is "public".
+            ip = "127.0.0.1" if host == "localhost" else "93.184.216.34"
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
 
     monkeypatch.setattr(socket, "getaddrinfo", fake)

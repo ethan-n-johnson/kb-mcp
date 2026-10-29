@@ -283,23 +283,39 @@ def _latest_candidates(s3: Any, bucket: str) -> list[str]:
     return keys
 
 
+def fetch_database(s3: Any, bucket: str, key: str, directory: Path) -> tuple[Path, int]:
+    """Download `key`, gunzip it into `directory` and check it; return `(path, doc count)`.
+
+    Raises `BackupError` when the download fails (including a missing object) and
+    `CorruptBackup` when the file is not gzip or fails the integrity check.
+    """
+    packed = directory / "kb.db.gz"
+    fresh = directory / "kb.db"
+    try:
+        s3.download_file(bucket, key, str(packed))
+    except Exception as exc:
+        raise BackupError(f"download of s3://{bucket}/{key} failed: {exc}") from exc
+    try:
+        with gzip.open(packed, "rb") as gz, fresh.open("wb") as out:
+            shutil.copyfileobj(gz, out)
+    except (OSError, EOFError) as exc:  # BadGzipFile is an OSError
+        raise CorruptBackup(f"backup {key} is not a valid gzip file: {exc}") from exc
+    return fresh, _check_database(fresh)
+
+
+def upload_database(
+    source: Path, bucket: str, key: str, *, client: Any | None = None, region: str | None = None
+) -> BackupResult:
+    """Check, gzip and upload the SQLite file `source` to `s3://bucket/key` (encrypted)."""
+    return _upload_copy(source, bucket, key, client, region)
+
+
 def _restore_key(s3: Any, bucket: str, key: str, dest: Path, now: datetime | None) -> RestoreResult:
     """Download `key`, verify it and swap it in as `dest`."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     # Same directory as the target so the final rename never crosses filesystems.
     with tempfile.TemporaryDirectory(prefix=".kb-restore-", dir=dest.parent) as tmp:
-        packed = Path(tmp) / "kb.db.gz"
-        fresh = Path(tmp) / "kb.db"
-        try:
-            s3.download_file(bucket, key, str(packed))
-        except Exception as exc:
-            raise BackupError(f"download of s3://{bucket}/{key} failed: {exc}") from exc
-        try:
-            with gzip.open(packed, "rb") as gz, fresh.open("wb") as out:
-                shutil.copyfileobj(gz, out)
-        except (OSError, EOFError) as exc:  # BadGzipFile is an OSError
-            raise CorruptBackup(f"backup {key} is not a valid gzip file: {exc}") from exc
-        docs = _check_database(fresh)
+        fresh, docs = fetch_database(s3, bucket, key, Path(tmp))
         previous = _swap_in(fresh, dest, _stamp(now))
     log.info("restored", extra={"key": key, "target": str(dest), "docs": docs})
     return RestoreResult(key=key, target=dest, previous=previous, docs=docs)

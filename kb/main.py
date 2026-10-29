@@ -14,10 +14,11 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 from starlette.types import Scope
 
-from kb import db, snapshot
+from kb import snapshot
+from kb.store import Store, close_pools, init_schema, open_store
 from kb.api import register_error_handlers, router as api_router
 from kb.clientip import ClientIpMiddleware
-from kb.config import get_settings
+from kb.config import Settings, get_settings
 from kb.logging import setup_logging
 from kb.mcp_http import mount_mcp
 from kb.mcp_tools import build_mcp
@@ -51,6 +52,15 @@ class CachedStaticFiles(StaticFiles):
         if response.status_code == 200:
             response.headers["Cache-Control"] = f"public, max-age={STATIC_MAX_AGE}"
         return response
+
+
+def _count_chunks(settings: Settings) -> int:
+    """Chunk count on a short-lived connection (PostgreSQL mode; runs in a worker thread)."""
+    conn = open_store(settings)
+    try:
+        return int(conn.execute("SELECT count(*) FROM chunks").fetchone()[0])
+    finally:
+        conn.close()
 
 
 def _add_security(app: FastAPI) -> None:
@@ -96,9 +106,13 @@ def create_app(
         setup_logging()
         settings = get_settings()
         parse_rate(settings.search_rate)  # a bad KB_SEARCH_RATE stops startup, not every search
-        conn = db.connect(settings.db_path)
-        db.init_schema(conn)
+        conn: Store | None = open_store(settings)
+        init_schema(conn)
         app.state.settings = settings
+        if settings.dialect == "postgres":
+            # No connection is held for /healthz: the pool serves it per request.
+            conn.close()
+            conn = None
         app.state.conn = conn
         # Started before the backfill so the vectors it writes are snapshotted too.
         snapshots = snapshot.from_settings(settings)
@@ -111,7 +125,8 @@ def create_app(
             log.info(
                 "startup complete",
                 extra={
-                    "db_path": settings.db_path,
+                    # The PostgreSQL URL carries the password; log only the dialect.
+                    "database": settings.db_path if conn is not None else "postgres",
                     "models_on": settings.models_on,
                     "snapshots": snapshots is not None,
                 },
@@ -125,7 +140,9 @@ def create_app(
                 # SIGTERM from `docker stop` lands here once uvicorn has drained
                 # its requests: upload a last snapshot if a write is still pending.
                 await run_in_threadpool(snapshots.stop)
-            conn.close()
+            if conn is not None:
+                conn.close()
+            close_pools()
             log.info("shutdown complete")
 
     # Swagger UI and ReDoc load their scripts from a CDN, which the
@@ -150,7 +167,11 @@ def create_app(
         """
         state = request.app.state.search
         try:
-            count = request.app.state.conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
+            shared = request.app.state.conn
+            if shared is not None:
+                count = shared.execute("SELECT count(*) FROM chunks").fetchone()[0]
+            else:
+                count = await run_in_threadpool(_count_chunks, request.app.state.settings)
         except Exception:
             log.exception("health check failed")
             return JSONResponse({"status": "error"}, status_code=503)

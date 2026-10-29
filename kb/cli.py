@@ -135,17 +135,17 @@ def cmd_mcp_stdio(args: argparse.Namespace) -> int:
     """
     import asyncio
 
-    from kb import db
     from kb.config import get_settings
     from kb.logging import setup_logging
     from kb.mcp_tools import build_mcp
     from kb.search import indexing
+    from kb.store import init_schema, open_store
 
     setup_logging(sys.stderr)
     settings = get_settings()
-    conn = db.connect(settings.db_path)
+    conn = open_store(settings)
     try:
-        db.init_schema(conn)
+        init_schema(conn)
     finally:
         conn.close()
     state = indexing.build_state(settings)
@@ -163,6 +163,18 @@ def _stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _postgres_mode(command: str, settings: "Settings", instead: str = "export-sqlite") -> bool:
+    """Print an error and return True when `command` (a SQLite file operation) cannot run."""
+    if not settings.database_url:
+        return False
+    print(
+        f"error: {command} works on the SQLite file; KB_DATABASE_URL is set, so use {instead}"
+        " (RDS keeps its own backups)",
+        file=sys.stderr,
+    )
+    return True
+
+
 def cmd_backup(args: argparse.Namespace) -> int:
     """Back up `KB_DB` to `s3://$KB_BUCKET/backups/` and print the S3 key.
 
@@ -173,6 +185,8 @@ def cmd_backup(args: argparse.Namespace) -> int:
     from kb.config import get_settings
 
     settings = get_settings()
+    if _postgres_mode("backup", settings):
+        return 1
     if not settings.bucket:
         print(f"{_stamp()} backup failed: KB_BUCKET is not set", file=sys.stderr)
         return 1
@@ -207,6 +221,8 @@ def cmd_restore(args: argparse.Namespace) -> int:
     from kb.config import get_settings
 
     settings = get_settings()
+    if _postgres_mode("restore", settings, "import-sqlite --force"):
+        return 1
     if not args.force:
         print(
             "error: restore replaces the database file; stop the app first, then pass --force",
@@ -271,6 +287,7 @@ def cmd_seed(args: argparse.Namespace) -> int:
     """
     from kb import db, seed
     from kb.config import get_settings
+    from kb.store import init_schema, open_store
 
     try:
         manifest = seed.load_manifest(args.manifest)
@@ -283,11 +300,12 @@ def cmd_seed(args: argparse.Namespace) -> int:
         print(f"dry run: {len(manifest.entries)} entries, nothing is written")
         state = None
     else:
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        print(f"database: {db_path}")
-        conn = db.connect(db_path)
+        if settings.dialect == "sqlite":
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"database: {db_path if settings.dialect == 'sqlite' else 'PostgreSQL'}")
+        conn = open_store(settings)
         try:
-            db.init_schema(conn)
+            init_schema(conn)
         finally:
             conn.close()
         state = _open_state(settings, models=True)
@@ -302,7 +320,7 @@ def cmd_seed(args: argparse.Namespace) -> int:
         if outcome.detail:
             print(f"{'':>18}{outcome.detail}", flush=True)
 
-    conn = db.connect(":memory:" if args.dry_run else db_path)
+    conn = db.connect(":memory:") if args.dry_run else open_store(settings)
     try:
         outcomes = seed.seed(conn, manifest, search_state=state, dry_run=args.dry_run, progress=show)
     finally:
@@ -310,7 +328,7 @@ def cmd_seed(args: argparse.Namespace) -> int:
     counts = seed.summary(outcomes)
     print("summary: " + ", ".join(f"{n} {status}" for status, n in sorted(counts.items())))
     if not args.dry_run:
-        conn = db.connect(db_path)
+        conn = open_store(settings)
         try:
             docs = int(conn.execute("SELECT count(*) FROM docs").fetchone()[0])
         finally:
@@ -370,6 +388,8 @@ def cmd_snapshot_push(args: argparse.Namespace) -> int:
     from kb.config import get_settings
 
     settings = get_settings()
+    if _postgres_mode("snapshot-push", settings):
+        return 1
     if not settings.bucket:
         print("error: KB_BUCKET is not set", file=sys.stderr)
         return 1
@@ -384,6 +404,86 @@ def cmd_snapshot_push(args: argparse.Namespace) -> int:
     print(f"uploaded: s3://{settings.bucket}/{SNAPSHOT_KEY}")
     print(f"docs:     {result.docs}")
     print(f"bytes:    {result.bytes_uploaded}")
+    return 0
+
+
+def cmd_export_sqlite(args: argparse.Namespace) -> int:
+    """Write the PostgreSQL database into a SQLite file and upload it (the portable copy).
+
+    `--to` is `s3://<bucket>/<key>` (gzip, uploaded) or a local file path; it
+    defaults to the snapshot key in `KB_BUCKET`, which is what a new empty
+    sandbox account and `infra/up.sh save` use.
+    """
+    from kb import portable
+    from kb.backup import SNAPSHOT_KEY, BackupError
+    from kb.config import get_settings
+    from kb.store import open_store
+
+    settings = get_settings()
+    if not settings.database_url:
+        print("error: KB_DATABASE_URL is not set; there is no PostgreSQL database to export", file=sys.stderr)
+        return 1
+    target = args.to or (f"s3://{settings.bucket}/{SNAPSHOT_KEY}" if settings.bucket else None)
+    if not target:
+        print("error: give --to, or set KB_BUCKET to use the snapshot key", file=sys.stderr)
+        return 1
+    store = open_store(settings)
+    try:
+        result = portable.export_to(store, target, region=settings.aws_region)
+    except (BackupError, ValueError) as exc:
+        print(f"error: export failed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+    print(f"exported: {result.uploaded}")
+    print("rows:     " + ", ".join(f"{n} {table}" for table, n in result.counts.items()))
+    return 0
+
+
+def cmd_import_sqlite(args: argparse.Namespace) -> int:
+    """Copy a SQLite database (file, `s3://` address or key in `KB_BUCKET`) into PostgreSQL.
+
+    Keeps ids, timestamps, tags, gaps, the audit log and the stored embeddings;
+    nothing is re-embedded. Refuses a database that already has documents:
+    `--if-empty` turns that into a quiet skip (exit 0, used by the instance boot
+    script), `--force` replaces the contents. A source that does not exist
+    exits 0 too (a brand new deployment); any other S3 problem exits 1 so the
+    boot retries instead of starting empty.
+    """
+    from kb import portable
+    from kb.backup import BackupError
+    from kb.config import get_settings
+    from kb.store import init_schema, open_store
+
+    settings = get_settings()
+    if not settings.database_url:
+        print("error: KB_DATABASE_URL is not set; import-sqlite writes into PostgreSQL", file=sys.stderr)
+        return 1
+    store = open_store(settings)
+    try:
+        init_schema(store)
+        try:
+            result = portable.import_from(
+                store, args.source, bucket=settings.bucket, force=args.force, region=settings.aws_region
+            )
+        except portable.DatabaseNotEmpty as exc:
+            if args.if_empty:
+                print(f"skipped: {exc}; nothing imported")
+                return 0
+            print(f"error: {exc}; pass --force to replace it", file=sys.stderr)
+            return 1
+        except portable.NothingToImport as exc:
+            print(f"nothing to import ({exc}); starting with an empty database")
+            return 0
+        except (BackupError, ValueError, OSError) as exc:
+            print(f"error: import failed: {exc}", file=sys.stderr)
+            return 1
+    finally:
+        store.close()
+    print(f"imported: {args.source}")
+    print("rows:     " + ", ".join(f"{n} {table}" for table, n in result.counts.items()))
+    if result.dropped_vectors:
+        print(f"note:     {result.dropped_vectors} embeddings had the wrong size; the server will re-embed them")
     return 0
 
 
@@ -471,6 +571,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="upload KB_DB as s3://$KB_BUCKET/snapshots/kb-latest.db.gz (restored at instance boot)",
     )
     push.set_defaults(func=cmd_snapshot_push)
+
+    export = sub.add_parser(
+        "export-sqlite",
+        help="write the PostgreSQL database into a SQLite file and upload it (default: the S3 snapshot key)",
+    )
+    export.add_argument(
+        "--to", metavar="DEST", default=None, help="s3://<bucket>/<key> or a local file (default: the snapshot in KB_BUCKET)"
+    )
+    export.set_defaults(func=cmd_export_sqlite)
+
+    imp = sub.add_parser(
+        "import-sqlite",
+        help="copy a SQLite database into an empty PostgreSQL database (ids and embeddings kept)",
+    )
+    imp.add_argument(
+        "--from", dest="source", metavar="SRC", required=True,
+        help="a local file (.db or .db.gz), s3://<bucket>/<key>, or a key in KB_BUCKET such as snapshots/kb-latest.db.gz",
+    )
+    mode = imp.add_mutually_exclusive_group()
+    mode.add_argument("--force", action="store_true", help="replace what the database already holds")
+    mode.add_argument(
+        "--if-empty", action="store_true", help="do nothing (exit 0) when the database already has documents"
+    )
+    imp.set_defaults(func=cmd_import_sqlite)
     return parser
 
 

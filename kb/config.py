@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping
 
 log = logging.getLogger(__name__)
@@ -48,14 +48,25 @@ class Settings:
     proxy_hops: int = 0
     snapshots: bool = True
     snapshot_interval: float = 5.0
+    # Holds the database password, so it stays out of every repr and log line.
+    database_url: str | None = field(default=None, repr=False)
+    database_url_source: str = "env"
+    database_url_key: str = "config/database-url"
+
+    @property
+    def dialect(self) -> str:
+        """`postgres` when a database URL is set, else `sqlite` (the file `db_path`)."""
+        return "postgres" if self.database_url else "sqlite"
 
     @property
     def snapshots_enabled(self) -> bool:
         """True when committed writes are uploaded to S3 as snapshots.
 
-        Needs `KB_BUCKET` and `KB_SNAPSHOTS` not set to `off`.
+        Needs `KB_BUCKET` and `KB_SNAPSHOTS` not set to `off`. Snapshots copy the
+        SQLite file, so they never run in PostgreSQL mode (the S3 export,
+        `kb.portable`, takes their place).
         """
-        return self.snapshots and bool(self.bucket)
+        return self.snapshots and bool(self.bucket) and self.database_url is None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -74,6 +85,19 @@ class Settings:
         tokens_source = (e.get("KB_TOKENS_SOURCE") or cls.tokens_source).strip().lower()
         if tokens_source not in ("ssm", "s3"):
             raise ValueError("KB_TOKENS_SOURCE must be ssm or s3")
+        database_url_source = (e.get("KB_DATABASE_URL_SOURCE") or "env").strip().lower()
+        if database_url_source not in ("env", "s3"):
+            raise ValueError("KB_DATABASE_URL_SOURCE must be s3 (or unset)")
+        database_url_key = e.get("KB_DATABASE_URL_KEY") or cls.database_url_key
+        aws_region = e.get("AWS_REGION") or cls.aws_region
+        database_url = (e.get("KB_DATABASE_URL") or "").strip() or None
+        if database_url is None and database_url_source == "s3":
+            if not e.get("KB_BUCKET"):
+                raise ValueError("KB_DATABASE_URL_SOURCE=s3 needs KB_BUCKET")
+            database_url = load_database_url(e["KB_BUCKET"], database_url_key, aws_region)
+        if database_url is not None and not database_url.startswith(("postgresql://", "postgres://")):
+            # Never echo the value: it carries the password.
+            raise ValueError("the database URL must start with postgresql://")
         return cls(
             db_path=e.get("KB_DB") or cls.db_path,
             models_on=(e.get("KB_MODELS") or "on").strip().lower() != "off",
@@ -83,7 +107,7 @@ class Settings:
             tokens_param=e.get("KB_TOKENS_PARAM") or cls.tokens_param,
             tokens_source=tokens_source,
             tokens_key=e.get("KB_TOKENS_KEY") or cls.tokens_key,
-            aws_region=e.get("AWS_REGION") or cls.aws_region,
+            aws_region=aws_region,
             conf_high=_float(e, "KB_CONF_HIGH", cls.conf_high),
             conf_low=_float(e, "KB_CONF_LOW", cls.conf_low),
             cosine_conf_high=_float(e, "KB_COSINE_CONF_HIGH", cls.cosine_conf_high),
@@ -98,7 +122,41 @@ class Settings:
             proxy_hops=_int(e, "KB_PROXY_HOPS", cls.proxy_hops),
             snapshots=(e.get("KB_SNAPSHOTS") or "on").strip().lower() != "off",
             snapshot_interval=interval,
+            database_url=database_url,
+            database_url_source=database_url_source,
+            database_url_key=database_url_key,
         )
+
+
+_db_url_lock = threading.Lock()
+_cached_db_urls: dict[tuple[str, str], str] = {}
+
+
+def clear_database_url_cache() -> None:
+    """Forget database URLs read from S3 (used by tests)."""
+    with _db_url_lock:
+        _cached_db_urls.clear()
+
+
+def load_database_url(bucket: str, key: str, region: str) -> str:
+    """Read the database URL from `s3://bucket/key`, once per process (cached).
+
+    The same pattern as the S3 write tokens (`KB_TOKENS_SOURCE=s3`): the sandbox
+    instance role can reach S3 and nothing else. The value carries the database
+    password, so it is never logged.
+    """
+    with _db_url_lock:
+        cached = _cached_db_urls.get((bucket, key))
+        if cached is not None:
+            return cached
+        import boto3  # imported lazily so the env path never touches AWS
+
+        client = boto3.client("s3", region_name=region)
+        resp = client.get_object(Bucket=bucket, Key=key)
+        url = resp["Body"].read().decode("utf-8").strip()
+        _cached_db_urls[(bucket, key)] = url
+        log.info("database url loaded", extra={"database_url_source": "s3", "key": key})
+        return url
 
 
 def get_settings() -> Settings:

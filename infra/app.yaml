@@ -45,6 +45,17 @@ Parameters:
     ConstraintDescription: Empty (no CORS headers at all) or chrome-extension:// followed by the 32 letter extension ID.
     Description: Origin of the Chrome capture extension (KB_EXTENSION_ORIGIN), the only origin CORS allows on the API. Leave empty to send no CORS headers. infra/deploy.sh reads it from KB_EXTENSION_ORIGIN. The pattern keeps the value safe to place in the user data shell script.
 
+  DatabaseMode:
+    Type: String
+    Default: sqlite
+    AllowedValues:
+      - sqlite
+      - postgres
+    Description: Where the knowledge base lives. sqlite (default until phase 22) keeps the database on the instance root volume, snapshotted to S3 after every write. postgres uses the RDS instance of the kb-db stack (which must exist; the instance joins kb-DbClientSg), reads the connection URL from s3://<bucket>/config/database-url, and on an empty database imports snapshots/kb-latest.db.gz at boot. infra/deploy.sh reads it from KB_DATABASE_MODE.
+
+Conditions:
+  UsePostgres: !Equals [!Ref DatabaseMode, postgres]
+
 Resources:
   # ---------------------------------------------------------------- Networking
   # The NAT gateway lives here (not in kb-network) so deleting kb-app removes
@@ -476,8 +487,12 @@ Resources:
         NetworkInterfaces:
           - DeviceIndex: 0
             AssociatePublicIpAddress: false
-            Groups:
-              - !Ref AppSg
+            # PostgreSQL mode: kb-DbClientSg is the only source the database accepts.
+            Groups: !If
+              - UsePostgres
+              - - !Ref AppSg
+                - !ImportValue kb-DbClientSg
+              - - !Ref AppSg
         BlockDeviceMappings:
           - DeviceName: /dev/xvda
             Ebs:
@@ -501,9 +516,9 @@ Resources:
         # Inline user data (deviation 2 in docs/PROGRESS.md). Inside Fn::Sub a
         # literal shell brace expression must be written with an exclamation mark
         # after the dollar and open brace; plain $VAR needs no escaping.
-        # The Sub variables are: Bucket and PublicHost (map below), ImageTag, MetricsMode and
-        # ExtensionOrigin (parameters), AWS::Region and AWS::StackName (pseudo
-        # parameters).
+        # The Sub variables are: Bucket and PublicHost (map below), ImageTag, MetricsMode,
+        # ExtensionOrigin and DatabaseMode (parameters), AWS::Region and AWS::StackName
+        # (pseudo parameters).
         UserData:
           Fn::Base64: !Sub
             - |
@@ -586,11 +601,17 @@ Resources:
               retry 5 10 load_image
               docker image inspect "$IMAGE" > /dev/null
 
-              # 4. Restore the database before the app starts: the snapshot
-              # (snapshots/kb-latest.db.gz), else the newest nightly backup, else
-              # nothing (exit 0, the app creates an empty database). If S3 cannot be
-              # read this fails and the boot fails: starting empty would let the
-              # first write overwrite the snapshot of the real data.
+              # 4. The database before the app starts.
+              # sqlite: restore the file from the snapshot (snapshots/kb-latest.db.gz),
+              # else the newest nightly backup, else nothing (exit 0, the app creates an
+              # empty database). If S3 cannot be read this fails and the boot fails:
+              # starting empty would let the first write overwrite the snapshot of the
+              # real data.
+              # postgres: the data lives in RDS and outlives this instance, so the only
+              # job is the first fill: import the S3 snapshot when the database is empty
+              # (--if-empty skips otherwise; no snapshot at all is a quiet no-op; any
+              # other failure fails the boot). Nothing is re-embedded.
+              DATABASE_MODE=${DatabaseMode}
               restore_db() {
                 docker run --rm \
                   -v /data:/data \
@@ -600,7 +621,21 @@ Resources:
                   "$IMAGE" \
                   python -m kb.cli restore --latest --force --target /data/kb.db
               }
-              retry 5 15 restore_db
+              import_db() {
+                docker run --rm \
+                  -e KB_BUCKET=${Bucket} \
+                  -e AWS_REGION=${AWS::Region} \
+                  -e KB_DATABASE_URL_SOURCE=s3 \
+                  "$IMAGE" \
+                  python -m kb.cli import-sqlite --from snapshots/kb-latest.db.gz --if-empty
+              }
+              DB_OPTS=()
+              if [ "$DATABASE_MODE" = postgres ]; then
+                retry 5 15 import_db
+                DB_OPTS=(-e KB_DATABASE_URL_SOURCE=s3)
+              else
+                retry 5 15 restore_db
+              fi
 
               # CloudWatch agent: host memory and disk metrics (namespace CWAgent),
               # also aggregated per Auto Scaling group for the kb-memory alarm. A
@@ -663,15 +698,24 @@ Resources:
                 -e "KB_EXTENSION_ORIGIN=${ExtensionOrigin}" \
                 -e KB_PROXY_HOPS=2 \
                 -e KB_PUBLIC_URL=https://${PublicHost} \
+                "${!DB_OPTS[@]}" \
                 "${!LOG_OPTS[@]}" \
                 "$IMAGE"
 
               # Nightly SQLite backup to s3://<bucket>/backups/ at 07:15 UTC (about
               # 2:15 AM Central). crond was enabled with the packages above. The
               # container has KB_DB and KB_BUCKET; output goes to /var/log/kb-backup.log.
-              printf '%s\n' \
-                '15 7 * * * root docker exec kb python -m kb.cli backup >> /var/log/kb-backup.log 2>&1' \
-                > /etc/cron.d/kb-backup
+              # In postgres mode the nightly job refreshes the portable SQLite snapshot
+              # instead (RDS keeps its own backups).
+              if [ "$DATABASE_MODE" = postgres ]; then
+                printf '%s\n' \
+                  '15 7 * * * root docker exec kb python -m kb.cli export-sqlite >> /var/log/kb-backup.log 2>&1' \
+                  > /etc/cron.d/kb-backup
+              else
+                printf '%s\n' \
+                  '15 7 * * * root docker exec kb python -m kb.cli backup >> /var/log/kb-backup.log 2>&1' \
+                  > /etc/cron.d/kb-backup
+              fi
               chmod 0644 /etc/cron.d/kb-backup
 
               # 6. Wait up to 10 minutes for the app, then let the EXIT trap send the

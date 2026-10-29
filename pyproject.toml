@@ -14,7 +14,7 @@ dependencies = [
   "fastembed",
   "numpy",
   "trafilatura>=2.0",
-  "pymupdf4llm",
+  "pymupdf4llm>=1.27,<2",
   "httpx",
   "jinja2",
   "nh3",
@@ -23,6 +23,9 @@ dependencies = [
   "pyyaml",
   "markdown-it-py",
   "python-multipart",
+  "psycopg[binary]",
+  "psycopg-pool",
+  "pgvector",
 ]
 
 [project.optional-dependencies]
@@ -36,7 +39,7 @@ dev = [
 include = ["kb*"]
 
 [tool.setuptools.package-data]
-kb = ["templates/*", "static/*"]
+kb = ["templates/*", "static/*", "store/*.sql"]
 
 [tool.ruff]
 target-version = "py312"
@@ -56,4 +59,5 @@ testpaths = ["tests"]
 addopts = "-m 'not models'"
 markers = [
   "models: loads real ONNX models (slow, needs the model cache)",
+  "pg: runs against PostgreSQL (needs KB_TEST_DATABASE_URL, otherwise skipped)",
 ]

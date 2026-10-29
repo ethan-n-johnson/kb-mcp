@@ -15,14 +15,17 @@ from kb import config
 def _clean(monkeypatch: pytest.MonkeyPatch):
     for var in (
         "KB_WRITE_TOKENS", "KB_TOKENS_PARAM", "KB_TOKENS_SOURCE", "KB_TOKENS_KEY", "KB_BUCKET",
-        "AWS_REGION", "KB_DB", "KB_MODELS",
+        "AWS_REGION", "KB_DB", "KB_MODELS", "KB_DATABASE_URL", "KB_DATABASE_URL_SOURCE",
+        "KB_DATABASE_URL_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
     config.clear_token_cache()
+    config.clear_database_url_cache()
     yield
     config.clear_token_cache()
+    config.clear_database_url_cache()
 
 
 def test_defaults() -> None:
@@ -164,3 +167,61 @@ def test_rerank_settings_are_read_and_validated() -> None:
     for bad in ({"KB_RERANK_CANDIDATES": "0"}, {"KB_RERANK_MAX_CHARS": "50"}):
         with pytest.raises(ValueError, match="KB_RERANK"):
             Settings.from_env(bad)
+
+
+# --- database URL (PostgreSQL mode) ---------------------------------------------------
+
+URL = "postgresql://kbadmin:s3cretpw@db.example:5432/kb?sslmode=require"
+
+
+def test_no_database_url_means_sqlite() -> None:
+    s = config.Settings.from_env({})
+    assert (s.database_url, s.dialect) == (None, "sqlite")
+
+
+def test_database_url_selects_postgres_and_stays_out_of_the_repr() -> None:
+    s = config.Settings.from_env({"KB_DATABASE_URL": URL, "KB_BUCKET": "b"})
+    assert (s.database_url, s.dialect) == (URL, "postgres")
+    assert "s3cretpw" not in repr(s)
+    assert s.snapshots_enabled is False  # snapshots copy the SQLite file
+
+
+def test_a_database_url_that_is_not_postgres_is_refused_without_echoing_it() -> None:
+    with pytest.raises(ValueError) as err:
+        config.Settings.from_env({"KB_DATABASE_URL": "mysql://u:s3cretpw@h/db"})
+    assert "s3cretpw" not in str(err.value)
+
+
+def test_unknown_database_url_source_is_refused() -> None:
+    with pytest.raises(ValueError):
+        config.Settings.from_env({"KB_DATABASE_URL_SOURCE": "ssm"})
+
+
+@mock_aws
+def test_database_url_is_read_from_s3_once_and_cached() -> None:
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="kb-x")
+    s3.put_object(Bucket="kb-x", Key="config/database-url", Body=URL.encode() + b"\n")
+    env = {"KB_DATABASE_URL_SOURCE": "s3", "KB_BUCKET": "kb-x"}
+    assert config.Settings.from_env(env).database_url == URL
+    s3.put_object(Bucket="kb-x", Key="config/database-url", Body=b"postgresql://other/db")
+    assert config.Settings.from_env(env).database_url == URL  # cached for the life of the process
+
+
+@mock_aws
+def test_database_url_key_can_be_chosen() -> None:
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="kb-x")
+    s3.put_object(Bucket="kb-x", Key="elsewhere/url", Body=URL.encode())
+    env = {"KB_DATABASE_URL_SOURCE": "s3", "KB_BUCKET": "kb-x", "KB_DATABASE_URL_KEY": "elsewhere/url"}
+    assert config.Settings.from_env(env).database_url == URL
+
+
+def test_the_env_url_wins_and_s3_is_not_called() -> None:
+    env = {"KB_DATABASE_URL": URL, "KB_DATABASE_URL_SOURCE": "s3"}  # no bucket, no AWS: must not matter
+    assert config.Settings.from_env(env).database_url == URL
+
+
+def test_s3_source_without_a_bucket_is_refused() -> None:
+    with pytest.raises(ValueError, match="KB_BUCKET"):
+        config.Settings.from_env({"KB_DATABASE_URL_SOURCE": "s3"})

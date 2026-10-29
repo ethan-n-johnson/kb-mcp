@@ -24,7 +24,6 @@ reason.
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -42,6 +41,7 @@ from kb.ingest.errors import IngestError
 from kb.ingest.fetch import fetch_url
 from kb.schemas import UploadRequest
 from kb.search.state import SearchState
+from kb.store import Store
 
 ACTOR = "cli"
 _TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -161,7 +161,7 @@ def load_manifest(path: str | Path) -> Manifest:
     return Manifest(entries=entries, stale=stale, stale_days=stale_days, delay_seconds=delay)
 
 
-def _doc_by_url(conn: sqlite3.Connection, url: str) -> int | None:
+def _doc_by_url(conn: Store, url: str) -> int | None:
     row = conn.execute(
         "SELECT id FROM docs WHERE source_url = ? ORDER BY id LIMIT 1", (url,)
     ).fetchone()
@@ -200,7 +200,7 @@ def _prepare(entry: Entry, transport: Any) -> tuple[UploadRequest, bytes, str | 
 
 
 def _seed_entry(
-    conn: sqlite3.Connection,
+    conn: Store,
     entry: Entry,
     search_state: SearchState | None,
     dry_run: bool,
@@ -226,7 +226,7 @@ def _seed_entry(
 
 
 def _apply_stale(
-    conn: sqlite3.Connection, manifest: Manifest, doc_ids: dict[str, int], now: datetime
+    conn: Store, manifest: Manifest, doc_ids: dict[str, int], now: datetime
 ) -> list[Outcome]:
     """Backdate `verified_at` and `updated_at` of the planted stale docs.
 
@@ -261,7 +261,7 @@ def _apply_stale(
 
 
 def seed(
-    conn: sqlite3.Connection,
+    conn: Store,
     manifest: Manifest,
     *,
     search_state: SearchState | None = None,

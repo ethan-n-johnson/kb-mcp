@@ -9,11 +9,12 @@ write), so a search always sees three arrays of the same length.
 from __future__ import annotations
 
 import logging
-import sqlite3
 import threading
 from typing import Iterable, Sequence
 
 import numpy as np
+
+from kb.store import Store
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ class VectorIndex:
     def __len__(self) -> int:
         return int(self._snap[1].shape[0])
 
-    def load_from_db(self, conn: sqlite3.Connection, embed_model: str) -> int:
+    def load_from_db(self, conn: Store, embed_model: str) -> int:
         """Replace the index with every stored vector made by `embed_model`.
 
         Rows with a NULL embedding, another model, or a BLOB of the wrong size

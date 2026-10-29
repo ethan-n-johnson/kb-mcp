@@ -20,7 +20,6 @@ or unknown token is not an error; the actor is then `MCP_ACTOR`.
 
 import logging
 import os
-import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any, TypeVar
@@ -31,7 +30,8 @@ from mcp_types import ToolAnnotations
 from pydantic import Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from kb import db, service
+from kb import service
+from kb.store import Store, open_store
 from kb.auth import bearer_secret, check_token
 from kb.errors import ServiceError
 from kb.ingest.convert import detect_format
@@ -202,11 +202,11 @@ def build_mcp(source: SearchStateSource, *, stdio: bool = False) -> MCPServer:
     def state() -> SearchState:
         return source() if callable(source) else source
 
-    async def call_read(fn: Callable[[sqlite3.Connection], T]) -> T:
+    async def call_read(fn: Callable[[Store], T]) -> T:
         """Run `fn(conn)` in a worker thread on its own short-lived connection."""
 
         def work() -> T:
-            conn = db.connect(state().db_path)
+            conn = open_store(state().settings)
             try:
                 return fn(conn)
             finally:
@@ -217,12 +217,12 @@ def build_mcp(source: SearchStateSource, *, stdio: bool = False) -> MCPServer:
         except Exception as exc:
             raise _as_tool_error(exc)
 
-    async def call_write(ctx: Context, fn: Callable[[sqlite3.Connection, str], T]) -> T:
+    async def call_write(ctx: Context, fn: Callable[[Store, str], T]) -> T:
         """Run `fn(conn, actor)` in a worker thread; `actor` comes from `mcp_actor`."""
 
         def work() -> T:
             actor = mcp_actor(ctx, stdio=stdio)
-            conn = db.connect(state().db_path)
+            conn = open_store(state().settings)
             try:
                 return fn(conn, actor)
             finally:
@@ -275,7 +275,7 @@ def build_mcp(source: SearchStateSource, *, stdio: bool = False) -> MCPServer:
         tags: Annotated[list[str] | None, Field(description="Tags to attach")] = None,
         force: Annotated[bool, Field(description="Save even if it looks like a near-duplicate")] = False,
     ) -> dict[str, Any]:
-        def run(conn: sqlite3.Connection, actor: str) -> dict[str, Any]:
+        def run(conn: Store, actor: str) -> dict[str, Any]:
             req = UploadRequest(
                 title=title, content=content, format=format, tags=tags or [], force=force
             )
@@ -302,7 +302,7 @@ def build_mcp(source: SearchStateSource, *, stdio: bool = False) -> MCPServer:
         if request is None and stdio:
             path = Path(filename).expanduser()
 
-            def run_local(conn: sqlite3.Connection, actor: str) -> dict[str, Any]:
+            def run_local(conn: Store, actor: str) -> dict[str, Any]:
                 try:
                     data = path.read_bytes()
                 except OSError as exc:
@@ -317,7 +317,7 @@ def build_mcp(source: SearchStateSource, *, stdio: bool = False) -> MCPServer:
 
             return await call_write(ctx, run_local)
 
-        def run_link(conn: sqlite3.Connection, actor: str) -> dict[str, Any]:
+        def run_link(conn: Store, actor: str) -> dict[str, Any]:
             base = state().settings.public_url
             if base is None:
                 assert request is not None

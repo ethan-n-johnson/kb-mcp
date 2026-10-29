@@ -65,7 +65,11 @@ def test_instances_are_private_and_require_imdsv2() -> None:
         "HttpEndpoint": "enabled", "HttpTokens": "required", "HttpPutResponseHopLimit": 2,
     }
     (nic,) = data["NetworkInterfaces"]
-    assert nic["AssociatePublicIpAddress"] is False and nic["Groups"] == [{"Ref": "AppSg"}]
+    assert nic["AssociatePublicIpAddress"] is False
+    # AppSg alone, or (PostgreSQL mode) AppSg plus the database client group, which allows no ingress.
+    assert nic["Groups"] == {
+        "Fn::If": ["UsePostgres", [{"Ref": "AppSg"}, {"Fn::ImportValue": "kb-DbClientSg"}], [{"Ref": "AppSg"}]]
+    }
     subnets = APP["AppAsg"]["Properties"]["VPCZoneIdentifier"]
     assert all("Private" in s["Fn::ImportValue"] for s in subnets)
     assert APP["AppAsg"]["Properties"]["MaxSize"] in (1, "1")

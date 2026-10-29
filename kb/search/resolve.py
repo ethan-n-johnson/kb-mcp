@@ -9,20 +9,21 @@ result of the write is decided and never lets it raise.
 from __future__ import annotations
 
 import logging
-import sqlite3
+from typing import Any
 
 import numpy as np
 
 from kb import db
 from kb.search.embedder import passage_text
 from kb.search.state import SearchState
+from kb.store import Store
 
 log = logging.getLogger(__name__)
 
 MAX_QUERIES = 50
 
 
-def _open_questions(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
+def _open_questions(conn: Store, limit: int) -> list[Any]:
     """Up to `limit` distinct unresolved `query_norm` values with an example query.
 
     Most asked first, then most recently asked. The example is the latest row.
@@ -36,7 +37,7 @@ def _open_questions(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def resolve_gaps(conn: sqlite3.Connection, state: SearchState | None, doc_id: int) -> int:
+def resolve_gaps(conn: Store, state: SearchState | None, doc_id: int) -> int:
     """Resolve open gaps that `doc_id` answers; returns how many questions were resolved.
 
     A question counts as answered when the reranker scores its best chunk of

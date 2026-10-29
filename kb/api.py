@@ -8,7 +8,6 @@ other exception gives a 500 `{"error": "internal"}` with no stack trace.
 from __future__ import annotations
 
 import logging
-import sqlite3
 from typing import Iterator
 
 from fastapi import APIRouter, Depends, FastAPI, File, Form, Query, Request, UploadFile
@@ -19,7 +18,8 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from kb import db, service
+from kb import service
+from kb.store import Store, open_store
 from kb.auth import require_writer
 from kb.errors import ServiceError, ingest_status
 from kb.ingest.convert import detect_format
@@ -32,6 +32,7 @@ from kb.schemas import (
     DocOut,
     ErrorOut,
     FallbackRequest,
+    ExportResult,
     FallbackResult,
     GapsResult,
     IngestRequest,
@@ -56,13 +57,13 @@ router = APIRouter(prefix="/api")
 _ERRORS = {"model": ErrorOut}
 
 
-def get_conn(request: Request) -> Iterator[sqlite3.Connection]:
+def get_conn(request: Request) -> Iterator[Store]:
     """Per-request database connection, closed when the request ends.
 
     A connection per request keeps `BEGIN IMMEDIATE` transactions from
     different threads apart (the thread pool runs sync routes concurrently).
     """
-    conn = db.connect(request.app.state.settings.db_path)
+    conn = open_store(request.app.state.settings)
     try:
         yield conn
     finally:
@@ -188,10 +189,10 @@ async def upload_with_ticket(ticket: str, request: Request, search: SearchState 
     plus 404 `bad_ticket`. `PUT` is accepted too, so `curl -T file URL` works.
     """
     data = await request.body()
-    db_path = request.app.state.settings.db_path
+    settings = request.app.state.settings
 
     def work() -> JSONResponse:
-        conn = db.connect(db_path)
+        conn = open_store(settings)
         try:
             return _upload_response(
                 service.upload_with_ticket(conn, ticket, data, search_state=search)
@@ -296,6 +297,12 @@ def set_fallback(
 ) -> FallbackResult:
     """Force keyword search on or off (for the demo). Requires a write token."""
     return service.set_fallback(conn, search, body.on, actor)
+
+
+@router.post("/admin/export", response_model=ExportResult, responses={401: _ERRORS, 400: _ERRORS})
+def export_database(request: Request, conn=Conn, actor: str = Writer) -> ExportResult:
+    """Write the PostgreSQL contents to the S3 snapshot now (`infra/up.sh save` calls this)."""
+    return service.export_database(conn, request.app.state.settings, actor)
 
 
 # --- error handling -----------------------------------------------------------

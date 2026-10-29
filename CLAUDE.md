@@ -19,27 +19,30 @@ Knowledge-base MCP server for the Cloud Computing course (AWS Academy Cloud Arch
 
 ## Stack
 
-Python 3.12, FastAPI, uvicorn, official `mcp` SDK 2.x (`MCPServer`, called `FastMCP` in 1.x), fastembed, numpy, SQLite with FTS5, trafilatura (>=2.0), pymupdf4llm, httpx, Jinja2 + htmx, nh3, slowapi, boto3, PyYAML. Dev: pytest, moto, cfn-lint.
+Python 3.12, FastAPI, uvicorn, official `mcp` SDK 2.x (`MCPServer`, called `FastMCP` in 1.x), fastembed, numpy, SQLite with FTS5 or PostgreSQL with pgvector (psycopg 3, chosen by `KB_DATABASE_URL`), trafilatura (>=2.0), pymupdf4llm, httpx, Jinja2 + htmx, nh3, slowapi, boto3, PyYAML. Dev: pytest, moto, cfn-lint.
 
 Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 
 ## Commands
 
-- Fast tests (models off): `pytest -q`
+- Fast tests (models off): `pytest -q` (SQLite; the PostgreSQL legs are skipped)
+- Fast tests on both backends: `docker run -d --name kb-pg -e POSTGRES_PASSWORD=dev -p 5432:5432 pgvector/pgvector:pg16`, then `KB_TEST_DATABASE_URL=postgresql://postgres:dev@localhost:5432/postgres pytest -q -m "not models"` (modules marked `dual` run on SQLite and PostgreSQL, tests marked `pg` only on PostgreSQL)
 - Model tests (loads real ONNX models, slower): `pytest -q -m models`
 - Run locally: `KB_DB=./.localdata/kb.db KB_WRITE_TOKENS=dev:devtoken uvicorn kb.main:app --port 8000 --workers 1`
+- PostgreSQL mode locally: add `KB_DATABASE_URL=postgresql://postgres:dev@localhost:5432/kb` to the commands above (create the database first). Copy data between the two: `python -m kb.cli import-sqlite --from <file, s3://... or key>` (into an empty database; `--if-empty`, `--force`) and `python -m kb.cli export-sqlite --to <file or s3://...>` (default: the S3 snapshot key)
 - Stdio MCP: `KB_DB=./.localdata/kb.db python -m kb.cli mcp-stdio` (no token needed; add `KB_WRITE_TOKENS=dev:devtoken KB_TOKEN=devtoken` to record writes as `dev` instead of `mcp`)
 - Seed: `KB_DB=./.localdata/seed/kb.db KB_MODEL_DIR=./.localdata/models python -m kb.cli seed seeds/seeds.yaml` (`--dry-run` checks every entry without writing); then `python -m kb.cli eval tests/eval/questions.yaml` and `KB_BUCKET=<bucket> python -m kb.cli snapshot-push` (docs/SETUP.md, "Seed the demo corpus")
 - Lint infra: `cfn-lint infra/*.yaml`
-- Deploy a stack: `infra/deploy.sh network|data|db|app [ImageTag]` (created in phases 01, 06 and 19; `db` needs `KB_DB_PASSWORD` in the environment, which `infra/up.sh` supplies from `~/.config/kb-mcp/db-password`)
+- Deploy a stack: `infra/deploy.sh network|data|db|app [ImageTag]` (created in phases 01, 06 and 19; `app` takes `KB_DATABASE_MODE=sqlite|postgres`, default sqlite; `db` needs `KB_DB_PASSWORD` in the environment, which `infra/up.sh` supplies from `~/.config/kb-mcp/db-password`)
 - Probe what RDS the sandbox allows: `infra/probe-rds.sh [--try-subnet-group]`
 
 ## Runtime rules (never break these)
 
 - uvicorn runs with exactly **1 worker**; the Auto Scaling group stays at **max 1**. The vector index lives in process memory.
+- Two storage backends behind `kb/store/`: SQLite (default) and PostgreSQL with pgvector (when `KB_DATABASE_URL` is set, or read from S3 with `KB_DATABASE_URL_SOURCE=s3`). Code outside `kb/store/` and the schema modules (`kb/db.py`, `kb/store/schema_pg.sql`) writes SQL once with `?` placeholders and gets the dialect from the store; dialect-specific SQL (schema, full-text search, vectors) stays in the dialect modules. In PostgreSQL mode there is no snapshot thread and no commit hook; the S3 snapshot comes from `export-sqlite` (nightly cron and `POST /api/admin/export`).
 - SQLite: `journal_mode=DELETE` (never WAL: the database must stay one self-contained file, because the snapshot copies it and a restore swaps it in whole), `foreign_keys=ON`, `busy_timeout=5000`. The database lives on the instance root volume (`/data/kb.db`) and is snapshotted to S3 after every write (`kb/snapshot.py`; the hook is in `kb/db.py`).
 - Embedding and reranking run in a thread pool (`run_in_threadpool`), never on the event loop.
-- Embeddings are stored as float32, L2-normalized BLOBs in `chunks.embedding`, with `chunks.embed_model` set.
+- Embeddings are stored as float32, L2-normalized BLOBs in `chunks.embedding` (PostgreSQL: `vector(384)`, handed to and from the code as the same bytes), with `chunks.embed_model` set.
 - Every interface (REST, MCP over HTTP, MCP over stdio, UI, extension) calls `kb/service.py`. No business logic in `api.py`, `mcp_tools.py`, `ui.py` or templates.
 - Logs are one JSON object per line. Stdout in server mode; **stderr in stdio MCP mode** (stdout carries the protocol).
 - `GET /healthz` returns 200 whenever the database is readable, including in keyword mode. Model failure must never make the ALB kill the instance.
@@ -54,6 +57,9 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 | `KB_MODELS` | `on` | `off` skips model loading (keyword mode only, used by fast tests) |
 | `KB_RERANK` | `on` | `off` skips the cross-encoder: candidates are ranked by cosine and judged by the `KB_COSINE_CONF_*` cutoffs (cut line 5) |
 | `KB_MODEL_DIR` | `/models` | fastembed cache dir (baked into the image) |
+| `KB_DATABASE_URL` | unset | `postgresql://user:password@host:5432/db?sslmode=require`. Unset: SQLite at `KB_DB`. Set: PostgreSQL (pool of 1 to 5 connections), `KB_DB` is ignored and snapshots are off. Carries the password: never logged, never in `repr(Settings)` |
+| `KB_DATABASE_URL_SOURCE` | `env` | `s3` reads the URL from `s3://$KB_BUCKET/$KB_DATABASE_URL_KEY` (once per process) when `KB_DATABASE_URL` is unset. The app stack sets `s3` in `DatabaseMode=postgres` |
+| `KB_DATABASE_URL_KEY` | `config/database-url` | Object in `KB_BUCKET` with the URL (`KB_DATABASE_URL_SOURCE=s3`) |
 | `KB_BUCKET` | unset | S3 bucket for originals, snapshots and backups; unset means skip S3 (and snapshots) |
 | `KB_SNAPSHOTS` | `on` | `off` stops the database snapshots to `s3://$KB_BUCKET/snapshots/kb-latest.db.gz` even when `KB_BUCKET` is set. Snapshots are also off when `KB_BUCKET` is unset |
 | `KB_SNAPSHOT_INTERVAL` | `5` | Seconds a burst of writes is collected before one snapshot upload (at most one upload per interval while the database is dirty). Must be greater than 0 |
@@ -74,6 +80,7 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 | `KB_SEARCH_RATE` | `30/minute` | Search rate limit per client address, one shared budget for `GET /api/search`, the UI search pages and the MCP `search` tool (stdio is unlimited). Over the limit: HTTP 429, or the tool error "Rate limit exceeded, try again in a minute". A malformed value stops startup |
 | `KB_PROXY_HOPS` | `0` | Number of proxies in front of the app that each append to `X-Forwarded-For` (2 behind CloudFront and the ALB, set in the instance user data). The client address is the entry that many places from the right; `0` ignores the header. uvicorn's own proxy handling is off |
 | `KB_METRICS_MODE` | `emf` | `api` sends search metrics with `put_metric_data` instead of EMF log lines |
+| `KB_TEST_DATABASE_URL` | unset | **Test only.** A scratch PostgreSQL database for the tests (their tables are emptied before each test). Unset skips the PostgreSQL legs |
 | `KB_FAKE_MODELS` | unset | **Test only.** `1` swaps in the doubles from `tests/fakes.py` for the real models (inert unless `tests/` is importable, so inert in the image). Never set it in a deployment |
 
 ## AWS Academy sandbox rules

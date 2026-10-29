@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import sqlite3
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 import httpx
@@ -34,7 +34,7 @@ def get_doc(client: TestClient, doc_id: int, chunks: bool = True) -> dict[str, A
     return resp.json()
 
 
-def rows(client: TestClient, sql: str, *params: Any) -> list[sqlite3.Row]:
+def rows(client: TestClient, sql: str, *params: Any) -> list[Any]:
     """Run a read query on a fresh connection to the app's database."""
     from tests.helpers import db_conn
 
@@ -63,10 +63,8 @@ def backdate(client: TestClient, doc_id: int, days: int, *, column: str = "updat
 
     conn = db_conn(client)
     try:
-        conn.execute(
-            f"UPDATE docs SET {column} = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?) WHERE id = ?",
-            (f"-{days} days", doc_id),
-        )
+        then = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn.execute(f"UPDATE docs SET {column} = ? WHERE id = ?", (then, doc_id))
     finally:
         conn.close()
 

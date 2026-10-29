@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import sqlite3
 from pathlib import Path
 
 import boto3
@@ -11,11 +10,15 @@ import pytest
 from fastapi.testclient import TestClient
 from moto import mock_aws
 
-from kb import db, service
+from kb import service
 from kb.errors import ServiceError
 from kb.ingest.errors import IngestError
 from kb.schemas import UploadRequest
+from kb.store import Store
+from tests.helpers import fts_count, fts_integrity_check, reopen
 from tests.pdfs import make_image_only_pdf, make_text_pdf
+
+pytestmark = pytest.mark.dual
 
 FIXTURES = Path(__file__).parent / "fixtures"
 AUTH = {"Authorization": "Bearer testtoken"}
@@ -42,7 +45,7 @@ def _post_md(client: TestClient, content: str = MD, **extra: object) -> object:
     return client.post("/api/docs", json=body, headers=AUTH)
 
 
-def _count(conn: sqlite3.Connection, table: str) -> int:
+def _count(conn: Store, table: str) -> int:
     return int(conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
 
 
@@ -88,7 +91,7 @@ def test_chunk_route_returns_parent_doc_with_chunk_marked(client: TestClient) ->
     assert client.get("/api/chunks/99999").status_code == 404
 
 
-def test_service_get_needs_exactly_one_id(conn: sqlite3.Connection) -> None:
+def test_service_get_needs_exactly_one_id(conn: Store) -> None:
     for kwargs in ({}, {"doc_id": 1, "chunk_id": 1}):
         with pytest.raises(ServiceError) as err:
             service.get(conn, **kwargs)
@@ -106,7 +109,7 @@ def test_source_url_is_stored_and_must_be_http(client: TestClient) -> None:
 # --- duplicates -----------------------------------------------------------------
 
 
-def test_same_content_is_a_duplicate_and_writes_nothing(client: TestClient, conn: sqlite3.Connection) -> None:
+def test_same_content_is_a_duplicate_and_writes_nothing(client: TestClient, conn: Store) -> None:
     first = _post_md(client).json()
     audit_before = _count(conn, "audit_log")
     again = _post_md(client)
@@ -127,13 +130,13 @@ def test_whitespace_only_differences_are_duplicates(client: TestClient) -> None:
     assert again.json()["doc_id"] == first["doc_id"]
 
 
-def test_different_content_is_not_a_duplicate(client: TestClient, conn: sqlite3.Connection) -> None:
+def test_different_content_is_not_a_duplicate(client: TestClient, conn: Store) -> None:
     _post_md(client)
     assert _post_md(client, content=MD + "\nOne more sentence of text.").status_code == 201
     assert _count(conn, "docs") == 2
 
 
-def test_commit_rechecks_the_hash_inside_the_transaction(conn: sqlite3.Connection) -> None:
+def test_commit_rechecks_the_hash_inside_the_transaction(conn: Store) -> None:
     prepared = service.prepare_upload(UploadRequest(content=MD))
     first = service.commit_prepared(conn, prepared, "t")
     second = service.commit_prepared(conn, prepared, "t")
@@ -153,15 +156,13 @@ def test_prepare_upload_touches_no_database() -> None:
 
 
 def test_hooks_run_after_commit_in_order(
-    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    conn: Store, db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     events: list[tuple[str, int, int]] = []
 
-    path = conn.execute("PRAGMA database_list").fetchone()["file"]
-
-    def written(c: sqlite3.Connection, doc_id: int, search_state: object = None) -> None:
+    def written(c: Store, doc_id: int, search_state: object = None) -> None:
         # A second connection sees the rows only if the transaction has committed.
-        other = db.connect(path)
+        other = reopen(db_path)
         try:
             events.append(("written", doc_id, _count(other, "chunks")))
         finally:
@@ -178,7 +179,7 @@ def test_hooks_run_after_commit_in_order(
 
 
 def test_hooks_do_not_run_for_duplicates_or_missing_docs(
-    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    conn: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service.upload(conn, UploadRequest(content=MD), "t")
     called: list[str] = []
@@ -201,7 +202,7 @@ def _bucket(monkeypatch: pytest.MonkeyPatch) -> object:
 
 
 def test_html_upload_saves_original_and_s3_key(
-    client: TestClient, conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, conn: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     html = (FIXTURES / "aws_like.html").read_text(encoding="utf-8")
     with mock_aws():
@@ -219,7 +220,7 @@ def test_html_upload_saves_original_and_s3_key(
 
 
 def test_multipart_pdf_original_keeps_its_filename(
-    client: TestClient, conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, conn: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pdf = make_text_pdf()
     with mock_aws():
@@ -237,7 +238,7 @@ def test_multipart_pdf_original_keeps_its_filename(
 
 
 def test_markdown_is_not_saved_to_s3(
-    client: TestClient, conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, conn: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with mock_aws():
         s3 = _bucket(monkeypatch)
@@ -247,7 +248,7 @@ def test_markdown_is_not_saved_to_s3(
 
 
 def test_no_bucket_means_no_aws_call(
-    client: TestClient, conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, conn: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def boom(*args: object, **kwargs: object) -> None:
         raise AssertionError("boto3.client must not be called when KB_BUCKET is unset")
@@ -260,7 +261,7 @@ def test_no_bucket_means_no_aws_call(
 
 
 def test_s3_failure_keeps_the_upload(
-    client: TestClient, conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, conn: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     html = (FIXTURES / "aws_like.html").read_text(encoding="utf-8")
     with mock_aws():
@@ -298,7 +299,7 @@ def test_multipart_pdf_upload_works(client: TestClient) -> None:
     assert any("Health checks" in c["heading_path"] for c in doc["chunks"])
 
 
-def test_image_only_pdf_is_422_no_text_layer(client: TestClient, conn: sqlite3.Connection) -> None:
+def test_image_only_pdf_is_422_no_text_layer(client: TestClient, conn: Store) -> None:
     resp = client.post(
         "/api/docs/file",
         files={"file": ("scan.pdf", make_image_only_pdf(), "application/pdf")},
@@ -320,18 +321,18 @@ def test_json_pdf_is_base64(client: TestClient) -> None:
 
 
 def test_delete_removes_doc_chunks_tags_and_fts_and_audits(
-    client: TestClient, conn: sqlite3.Connection
+    client: TestClient, conn: Store
 ) -> None:
     doc_id = _post_md(client, tags=["course"]).json()["doc_id"]
-    assert conn.execute("SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'balancer'").fetchone()[0] > 0
+    assert fts_count(conn, "balancer") > 0
 
     resp = client.delete(f"/api/docs/{doc_id}", headers=AUTH)
     assert resp.status_code == 200
     assert resp.json() == {"status": "deleted", "doc_id": doc_id}
 
     assert _count(conn, "docs") == _count(conn, "chunks") == _count(conn, "doc_tags") == 0
-    assert conn.execute("SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'balancer'").fetchone()[0] == 0
-    conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES ('integrity-check')")  # raises if stale
+    assert fts_count(conn, "balancer") == 0
+    fts_integrity_check(conn)  # raises if the SQLite FTS5 index is stale
     assert client.get(f"/api/docs/{doc_id}").status_code == 404
 
     rows = conn.execute("SELECT token_name, action, doc_id FROM audit_log ORDER BY id").fetchall()
@@ -341,7 +342,7 @@ def test_delete_removes_doc_chunks_tags_and_fts_and_audits(
     ]
 
 
-def test_deleting_a_missing_doc_is_404_and_unaudited(client: TestClient, conn: sqlite3.Connection) -> None:
+def test_deleting_a_missing_doc_is_404_and_unaudited(client: TestClient, conn: Store) -> None:
     resp = client.delete("/api/docs/42", headers=AUTH)
     assert resp.status_code == 404 and resp.json()["error"] == "not_found"
     assert _count(conn, "audit_log") == 0
@@ -393,7 +394,7 @@ def test_unhandled_errors_are_a_bare_500(client: TestClient, monkeypatch: pytest
     assert "secret" not in resp.text and "Traceback" not in resp.text
 
 
-def test_service_raises_typed_errors(conn: sqlite3.Connection) -> None:
+def test_service_raises_typed_errors(conn: Store) -> None:
     with pytest.raises(IngestError) as err:
         service.upload(conn, UploadRequest(content=" ", format="markdown"), "t")
     assert err.value.code == "empty_content"

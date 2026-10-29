@@ -25,7 +25,7 @@
 #   KB_CLOUDFRONT_PREFIX_LIST_ID  CloudFront origin-facing prefix list (pl-...),
 #                                 recorded in docs/PROGRESS.md in phase 00
 #   KB_ALERT_EMAIL                address for the alarm emails
-# and takes three optional values:
+# and takes four optional values:
 #   KB_INSTANCE_PROFILE           existing instance profile for the app instances,
 #                                 default myS3Role (the only profile the Cloud
 #                                 Architecting sandbox lets you pass; Learner Lab
@@ -35,6 +35,10 @@
 #                                 instance role that can write CloudWatch Logs
 #   KB_EXTENSION_ORIGIN           chrome-extension://<32 letter id>, the only origin
 #                                 CORS allows; unset or empty means no CORS headers
+#   KB_DATABASE_MODE              sqlite (default) or postgres, where the knowledge
+#                                 base lives; postgres needs the kb-db stack (the
+#                                 instance joins kb-DbClientSg and imports the S3
+#                                 snapshot into an empty RDS database at boot)
 set -euo pipefail
 
 REGION="us-east-1"
@@ -129,13 +133,21 @@ case "$1" in
     [ $# -eq 2 ] || usage
     require_env KB_CLOUDFRONT_PREFIX_LIST_ID "the CloudFront origin-facing prefix list ID (pl-..., see docs/PROGRESS.md, phase 00)"
     require_env KB_ALERT_EMAIL "the email address that receives the alarm emails"
+    case "${KB_DATABASE_MODE:-sqlite}" in
+      sqlite | postgres) ;;
+      *)
+        echo "error: KB_DATABASE_MODE must be sqlite or postgres" >&2
+        exit 2
+        ;;
+    esac
     deploy_stack app --parameter-overrides \
       "ImageTag=$2" \
       "CloudFrontPrefixListId=$KB_CLOUDFRONT_PREFIX_LIST_ID" \
       "AlertEmail=$KB_ALERT_EMAIL" \
       "MetricsMode=${KB_METRICS_MODE:-api}" \
       "InstanceProfileName=${KB_INSTANCE_PROFILE:-myS3Role}" \
-      "ExtensionOrigin=${KB_EXTENSION_ORIGIN:-}"
+      "ExtensionOrigin=${KB_EXTENSION_ORIGIN:-}" \
+      "DatabaseMode=${KB_DATABASE_MODE:-sqlite}"
     print_output AlbDnsName "ALB DNS name"
     print_output DistributionDomainName "CloudFront domain name"
     echo "Confirm the SNS subscription email sent to $KB_ALERT_EMAIL (alarm emails only arrive after that)."

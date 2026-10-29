@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import re
-import sqlite3
 import unicodedata
+
+from kb.store import Store
 
 _INNER_SPACE_RE = re.compile(r"(?<=\S)[ \t]+")
 
@@ -36,7 +37,7 @@ def content_hash(md: str) -> str:
     return hashlib.sha256(normalize_markdown(md).encode("utf-8")).hexdigest()
 
 
-def find_exact_duplicate(conn: sqlite3.Connection, digest: str) -> int | None:
+def find_exact_duplicate(conn: Store, digest: str) -> int | None:
     """Return the id of the doc whose `content_hash` equals `digest`, if any."""
     row = conn.execute("SELECT id FROM docs WHERE content_hash = ?", (digest,)).fetchone()
     return int(row["id"]) if row else None

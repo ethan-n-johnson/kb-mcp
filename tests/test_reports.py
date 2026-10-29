@@ -12,6 +12,8 @@ from tests.corpus import DOCS, EBS
 from tests.helpers import load_corpus, search, upload
 from tests.ops_helpers import add_gap, audit_rows, backdate, get_doc, rows
 
+pytestmark = pytest.mark.dual
+
 
 def verify(client: TestClient, doc_id: int, **body: object):
     return client.post(f"/api/docs/{doc_id}/verify", json=body or None, headers=AUTH)

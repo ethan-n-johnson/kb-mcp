@@ -294,6 +294,8 @@ def test_from_settings_returns_none_when_snapshots_are_off() -> None:
     assert snapshot.from_settings(Settings(bucket="b", snapshots=False)) is None
     made = snapshot.from_settings(Settings(bucket="b", snapshot_interval=7.0))
     assert made is not None and made.interval == 7.0 and made.bucket == "b"
+    # PostgreSQL mode: nothing to copy, whatever the bucket says
+    assert snapshot.from_settings(Settings(bucket="b", database_url="postgresql://u:p@h/d")) is None
 
 
 # --- the real app against moto ------------------------------------------------------------

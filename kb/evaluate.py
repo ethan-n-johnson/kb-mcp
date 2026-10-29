@@ -40,11 +40,12 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from kb import db, service
+from kb import db, portable, service
 from kb.config import Settings
 from kb.schemas import UploadRequest
 from kb.search import dupes, indexing, pipeline
 from kb.search.state import EmbedderLike, RerankerLike, SearchState
+from kb.store import Store, open_store
 
 KINDS = ("answerable", "paraphrase", "outside")
 EVAL_TIMEOUT = 60.0
@@ -250,7 +251,7 @@ def _copy_database(source: Path, dest: Path) -> None:
         src.close()
 
 
-def _dup_report(conn: sqlite3.Connection, state: SearchState, planted: Path, original_url: str) -> DupReport:
+def _dup_report(conn: Store, state: SearchState, planted: Path, original_url: str) -> DupReport:
     """Similarity of the planted file to every stored doc, with no write."""
     req = UploadRequest(content=planted.read_text(encoding="utf-8"), format="markdown", force=True)
     prepared = service.prepare_upload(req)
@@ -319,19 +320,34 @@ async def _run(state: SearchState, questions: list[Question]) -> list[QuestionRe
 def _temp_state(
     settings: Settings, embedder: EmbedderLike | None, reranker: RerankerLike | None
 ) -> Iterator[tuple[SearchState, Path]]:
-    """A started `SearchState` over a temporary copy of `settings.db_path`.
+    """A started `SearchState` over a temporary copy of the database.
 
-    Raises `RuntimeError` when the database is missing or the models cannot
-    load: tuning in keyword mode would measure the wrong thing.
+    The copy is a SQLite file: a copy of `settings.db_path`, or, in PostgreSQL
+    mode, an export of the database (`kb.portable`), so a question that logs a
+    gap never writes into the real one. (Phase 21 evaluates PostgreSQL's own
+    search.) Raises `RuntimeError` when the database is missing or the models
+    cannot load: tuning in keyword mode would measure the wrong thing.
     """
-    source = Path(settings.db_path)
-    if not source.is_file():
-        raise RuntimeError(f"database {source} does not exist; run the seed first")
     with tempfile.TemporaryDirectory(prefix="kb-eval-") as tmp:
         copy = Path(tmp) / "kb.db"
-        _copy_database(source, copy)
+        if settings.database_url:
+            store = open_store(settings)
+            try:
+                portable.export_sqlite(store, copy)
+            finally:
+                store.close()
+        else:
+            source = Path(settings.db_path)
+            if not source.is_file():
+                raise RuntimeError(f"database {source} does not exist; run the seed first")
+            _copy_database(source, copy)
         local = dataclasses.replace(
-            settings, db_path=str(copy), search_timeout=EVAL_TIMEOUT, bucket=None, models_on=True
+            settings,
+            db_path=str(copy),
+            database_url=None,
+            search_timeout=EVAL_TIMEOUT,
+            bucket=None,
+            models_on=True,
         )
         state = indexing.build_state(local, embedder, reranker)
         asyncio.run(indexing.start(state))

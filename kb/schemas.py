@@ -152,6 +152,15 @@ class FallbackResult(BaseModel):
     fallback_toggle: bool
 
 
+class ExportResult(BaseModel):
+    """Result of `POST /api/admin/export`: the SQLite snapshot written from PostgreSQL."""
+
+    status: str = "exported"
+    key: str
+    docs: int
+    chunks: int
+
+
 class IngestRequest(BaseModel):
     """Body of `POST /api/ingest`: fetch one page and store it like an upload."""
 

@@ -6,7 +6,11 @@
 #   infra/up.sh          deploy everything that is missing, then the app stack
 #   infra/up.sh save     download the latest database snapshot to the laptop
 #                        (run before the lab session ends; up.sh uploads it into
-#                        the next account so the knowledge base survives a reset)
+#                        the next account so the knowledge base survives a reset).
+#                        When kb-app runs in PostgreSQL mode (DatabaseMode=postgres)
+#                        it first asks the app to write a fresh export
+#                        (POST /api/admin/export, token from the write-tokens file),
+#                        because only the app updates the snapshot from RDS.
 #
 # Steps of infra/up.sh:
 #   1. Check the AWS credentials and the instance profile (myS3Role).
@@ -31,6 +35,7 @@
 #                      KB_METRICS_MODE, KB_EXTENSION_ORIGIN     (optional, see deploy.sh)
 #                      KB_DB_CLASS, KB_DB_VERSION, KB_DB_MULTI_AZ, KB_DB_ENCRYPTED
 #                                                               (optional, see deploy.sh)
+#                      KB_DATABASE_MODE=postgres                (optional, default sqlite)
 #   write-tokens     name:secret,name:secret (created on the first run if missing)
 #   db-password      the database master password, 32 letters and digits (created
 #                    on the first run if missing, mode 600). Lose it and the next
@@ -104,9 +109,39 @@ check_credentials() {
   step "AWS account $account"
 }
 
+# stack_output NAME KEY: one output of a stack ("" when the stack or output is missing).
+stack_output() {
+  aws cloudformation describe-stacks --region "$REGION" --stack-name "$1" \
+    --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" --output text 2> /dev/null || true
+}
+
+# export_postgres: when kb-app runs in PostgreSQL mode, have the app write a fresh export
+# to the snapshot key. The token is handed to curl through its config on stdin, so it
+# never appears in the process list, the log or the terminal.
+export_postgres() {
+  local mode domain token response
+  mode="$(aws cloudformation describe-stacks --region "$REGION" --stack-name kb-app \
+    --query "Stacks[0].Parameters[?ParameterKey=='DatabaseMode'].ParameterValue" \
+    --output text 2> /dev/null || true)"
+  [ "$mode" = postgres ] || return 0
+  [ -s "$TOKENS_FILE" ] || die "kb-app uses PostgreSQL but $TOKENS_FILE is missing; it is needed to ask the app for an export"
+  domain="$(stack_output kb-app DistributionDomainName)"
+  case "$domain" in
+    "" | None) die "output DistributionDomainName of kb-app not found; is the stack deployed?" ;;
+  esac
+  token="$(cut -d, -f1 "$TOKENS_FILE" | cut -d: -f2-)"
+  step "kb-app uses PostgreSQL; asking $domain to export the database first"
+  if ! response="$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
+    | curl --config - -fsS --max-time 300 -X POST "https://$domain/api/admin/export")"; then
+    die "the export failed; not downloading, the snapshot in the bucket may be out of date"
+  fi
+  step "export done: $response"
+}
+
 save_snapshot() {
   check_credentials
   find_bucket
+  export_postgres
   object_exists "$SNAPSHOT_KEY" || die "s3://$BUCKET/$SNAPSHOT_KEY does not exist; nothing to save"
   mkdir -p "$CONFIG_DIR"
   aws s3 cp "s3://$BUCKET/$SNAPSHOT_KEY" "$SNAPSHOT_FILE.tmp" --region "$REGION" > /dev/null
