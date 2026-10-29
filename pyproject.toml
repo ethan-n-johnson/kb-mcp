@@ -14,7 +14,7 @@ dependencies = [
   "fastembed",
   "numpy",
   "trafilatura>=2.0",
-  "pymupdf4llm",
+  "pymupdf4llm>=1.27,<2",
   "httpx",
   "jinja2",
   "nh3",
