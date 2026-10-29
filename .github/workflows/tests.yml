@@ -35,6 +35,23 @@ jobs:
     name: pytest
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # PostgreSQL with pgvector, the same image as the local test command in
+    # CLAUDE.md. With KB_TEST_DATABASE_URL set, the tests marked "dual" or "pg" run
+    # their PostgreSQL leg too; without it they are skipped.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      KB_TEST_DATABASE_URL: postgresql://postgres:dev@localhost:5432/postgres
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
@@ -53,8 +70,8 @@ jobs:
 
       # Fast tests only: pyproject.toml deselects the "models" marker, so no
       # ONNX models are downloaded. The tests set fake AWS credentials and use
-      # moto, so nothing here reaches a real AWS account.
-      - name: Run fast tests
+      # moto, so nothing here reaches a real AWS account. Both storage backends run.
+      - name: Run fast tests (SQLite and PostgreSQL)
         run: pytest -q
 
   cfn-lint:

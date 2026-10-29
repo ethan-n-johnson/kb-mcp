@@ -12,8 +12,10 @@ from kb.search.embedder import passage_text
 from tests.conftest import AUTH, OpenApp, Svc
 from tests.corpus import EBS, S3
 from tests.fakes import FakeEmbedder
-from tests.helpers import db_conn, load_corpus, search, upload
+from tests.helpers import db_conn, fts_count, load_corpus, reopen, search, upload
 from tests.ops_helpers import ProbeEmbedder, audit_rows, backdate, get_doc, rows, scalar
+
+pytestmark = pytest.mark.dual
 
 NEW_S3 = """# Amazon S3 storage classes
 
@@ -253,15 +255,13 @@ def test_update_to_the_same_hash_as_itself_is_not_a_duplicate(open_app: OpenApp)
 def test_a_concurrent_change_during_embedding_is_a_conflict_and_changes_nothing(
     open_app: OpenApp, db_path
 ) -> None:
-    from kb import db
-
     fired: list[bool] = []
 
     def meddle() -> None:
         if fired:
             return
         fired.append(True)
-        other = db.connect(db_path)
+        other = reopen(db_path)
         try:  # someone else edits the doc while we embed
             other.execute("UPDATE docs SET content_hash = 'changed-by-someone-else' WHERE id = 1")
         finally:
@@ -298,8 +298,7 @@ def test_old_chunks_leave_the_fts_index(open_app: OpenApp) -> None:
         patch(client, doc_id, content=NEW_S3)
         conn = db_conn(client)
         try:
-            old = conn.execute("SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'glacier'").fetchone()[0]
-            new = conn.execute("SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'tiering'").fetchone()[0]
+            old, new = fts_count(conn, "glacier"), fts_count(conn, "tiering")
         finally:
             conn.close()
     assert (old, new) == (0, 1)

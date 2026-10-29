@@ -25,10 +25,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sqlite3
 import time
 from dataclasses import dataclass
-from typing import Callable, Iterable, TypeVar
+from typing import Any, Callable, Iterable, TypeVar
 
 import numpy as np
 from starlette.concurrency import run_in_threadpool
@@ -37,7 +36,8 @@ from kb import db, metrics
 from kb.schemas import SearchHit, SearchResult
 from kb.search.embedder import passage_text
 from kb.search.state import SearchState
-from kb.search.text import fts_match, normalize_query, query_terms, snippet_from
+from kb.search.text import normalize_query, query_terms, snippet_from
+from kb.store import Store, open_store
 
 log = logging.getLogger(__name__)
 
@@ -85,17 +85,7 @@ async def _in_thread(fn: Callable[..., T], *args: object) -> T:
 # --- SQL helpers ----------------------------------------------------------------
 
 
-def _tag_filter_sql(tags: list[str]) -> tuple[str, list[object]]:
-    """SQL fragment (on `c.doc_id`) keeping only docs that carry ALL `tags`."""
-    marks = ",".join("?" * len(tags))
-    sql = (
-        " AND c.doc_id IN (SELECT doc_id FROM doc_tags WHERE tag IN (" + marks + ")"
-        " GROUP BY doc_id HAVING count(DISTINCT tag) = ?)"
-    )
-    return sql, [*tags, len(tags)]
-
-
-def _tagged_doc_ids(conn: sqlite3.Connection, tags: list[str]) -> list[int]:
+def _tagged_doc_ids(conn: Store, tags: list[str]) -> list[int]:
     marks = ",".join("?" * len(tags))
     rows = conn.execute(
         f"SELECT doc_id FROM doc_tags WHERE tag IN ({marks})"
@@ -105,27 +95,7 @@ def _tagged_doc_ids(conn: sqlite3.Connection, tags: list[str]) -> list[int]:
     return [r["doc_id"] for r in rows]
 
 
-def _fts_rows(
-    conn: sqlite3.Connection, match: str, tags: list[str], limit: int, with_snippet: bool
-) -> list[sqlite3.Row]:
-    """Top FTS5 rows by BM25 (best first) for a prepared MATCH expression."""
-    if not match:
-        return []
-    tag_sql, tag_params = _tag_filter_sql(tags) if tags else ("", [])
-    snippet_col = (
-        "snippet(chunks_fts, 1, '<b>', '</b>', '...', 24)" if with_snippet else "''"
-    )
-    return conn.execute(
-        f"SELECT c.id AS chunk_id, c.doc_id, c.heading_path, c.text, d.title, d.source_url,"
-        f" d.verified_at, bm25(chunks_fts) AS bm, {snippet_col} AS snip"
-        " FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid"
-        " JOIN docs d ON d.id = c.doc_id"
-        f" WHERE chunks_fts MATCH ?{tag_sql} ORDER BY bm LIMIT ?",
-        [match, *tag_params, limit],
-    ).fetchall()
-
-
-def _candidate(row: sqlite3.Row) -> _Candidate:
+def _candidate(row: Any) -> _Candidate:
     return _Candidate(
         chunk_id=row["chunk_id"],
         doc_id=row["doc_id"],
@@ -137,7 +107,7 @@ def _candidate(row: sqlite3.Row) -> _Candidate:
     )
 
 
-def _hydrate(conn: sqlite3.Connection, chunk_ids: list[int]) -> dict[int, _Candidate]:
+def _hydrate(conn: Store, chunk_ids: list[int]) -> dict[int, _Candidate]:
     """Load candidate rows by chunk id; ids no longer in the database are dropped."""
     if not chunk_ids:
         return {}
@@ -182,7 +152,7 @@ def _retrieve(
     state: SearchState, query: str, qvec: np.ndarray, tags: list[str]
 ) -> list[_Candidate]:
     """Top cosine matches (plus, when reranking, the FTS top 5) as candidates."""
-    conn = db.connect(state.db_path)
+    conn = open_store(state.settings)
     try:
         allowed = _tagged_doc_ids(conn, tags) if tags else None
         pool = SEMANTIC_CANDIDATES
@@ -192,8 +162,7 @@ def _retrieve(
         cosines = {chunk_id: score for chunk_id, _, score in hits}
         ids = [chunk_id for chunk_id, _, _ in hits]
         if state.rerank_enabled:
-            match = fts_match(query_terms(query))
-            for row in _fts_rows(conn, match, tags, FTS_CANDIDATES, with_snippet=False):
+            for row in conn.fts_rows(query_terms(query), tags, FTS_CANDIDATES, with_snippet=False):
                 if row["chunk_id"] not in ids:
                     ids.append(row["chunk_id"])
         loaded = _hydrate(conn, ids)
@@ -237,30 +206,21 @@ async def _semantic(state: SearchState, query: str, k: int, tags: list[str]) -> 
 # --- keyword path ---------------------------------------------------------------
 
 
-def _covers_all_terms(conn: sqlite3.Connection, terms: list[str], chunk_id: int) -> bool:
-    """True if the chunk matches every term, using FTS5's own tokenizer and stemmer."""
-    row = conn.execute(
-        "SELECT 1 FROM chunks_fts WHERE chunks_fts MATCH ? AND rowid = ?",
-        (fts_match(terms, "AND"), chunk_id),
-    ).fetchone()
-    return row is not None
-
-
 def _keyword(state: SearchState, query: str, k: int, tags: list[str]) -> SearchResult:
     """FTS5 MATCH with BM25 ranking. Confidence is `medium` at best, never `high`."""
     terms = query_terms(query)
-    conn = db.connect(state.db_path)
+    conn = open_store(state.settings)
     try:
-        rows = _fts_rows(conn, fts_match(terms), tags, max(k * 4, 20), with_snippet=True)
+        rows = conn.fts_rows(terms, tags, max(k * 4, 20), with_snippet=True)
         cands: list[_Candidate] = []
         for row in rows:
             cand = _candidate(row)
-            cand.score = -float(row["bm"])  # bm25() is lower-is-better and negative
+            cand.score = float(row["score"])  # higher is better in both dialects
             cand.snippet = row["snip"]
             cands.append(cand)
         kept = _cap_per_doc(cands, k)
         confidence = "low"
-        if kept and _covers_all_terms(conn, terms, kept[0].chunk_id):
+        if kept and conn.fts_covers(terms, kept[0].chunk_id):
             confidence = "medium"
     finally:
         conn.close()
@@ -274,7 +234,7 @@ def _log_gap(state: SearchState, query: str, result: SearchResult) -> None:
     """Insert a `gaps` row for a low-confidence search; failures are logged only."""
     top = result.results[0].score if result.results else None
     try:
-        conn = db.connect(state.db_path)
+        conn = open_store(state.settings)
         try:
             with db.transaction(conn):
                 conn.execute(

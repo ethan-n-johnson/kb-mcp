@@ -12,6 +12,8 @@ from tests.fakes import FakeEmbedder
 from tests.helpers import load_corpus, search, upload
 from tests.ops_helpers import add_gap, audit_rows, get_doc, rows, scalar
 
+pytestmark = pytest.mark.dual
+
 S3_URL = "https://docs.example.com/s3/storage-classes"
 ELB_URL = "https://docs.example.com/elb/health"
 

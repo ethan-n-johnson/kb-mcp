@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import sqlite3
 
 import numpy as np
 
 from kb.schemas import DuplicateCandidate
 from kb.search.embedder import normalize_rows
 from kb.search.state import SearchState
+from kb.store import Store
 
 MAX_CANDIDATES = 3
 
@@ -20,7 +20,7 @@ def doc_vector(chunk_vectors: np.ndarray) -> np.ndarray:
 
 
 def find_near_duplicates(
-    conn: sqlite3.Connection, state: SearchState, chunk_vectors: np.ndarray
+    conn: Store, state: SearchState, chunk_vectors: np.ndarray
 ) -> list[DuplicateCandidate]:
     """Existing docs whose vector is close to the new document's, best first.
 

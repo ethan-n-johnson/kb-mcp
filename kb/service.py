@@ -29,7 +29,6 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
-import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -39,7 +38,8 @@ import numpy as np
 from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import ValidationError
 
-from kb import db
+from kb import backup, db, portable
+from kb.config import Settings
 from kb.errors import ServiceError
 from kb import uploads
 from kb.ingest import dedupe, mdmerge, originals
@@ -53,6 +53,7 @@ from kb.schemas import (
     ChunkOut,
     DeleteResult,
     DocOut,
+    ExportResult,
     FallbackResult,
     GapOut,
     GapsResult,
@@ -70,10 +71,11 @@ from kb.schemas import (
 )
 from kb.search import dupes, indexing, pipeline, resolve
 from kb.search.state import SearchState
+from kb.store import Store
 
 log = logging.getLogger(__name__)
 
-Conn = sqlite3.Connection
+Conn = Store
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 _ORIGINAL_TYPES = {"html": "text/html", "pdf": "application/pdf"}
@@ -294,7 +296,7 @@ def commit_prepared(
         existing = dedupe.find_exact_duplicate(conn, prepared.content_hash)
         if existing is not None:
             return existing, False
-        cur = conn.execute(
+        doc_id = conn.insert(
             "INSERT INTO docs (title, source_url, source_type, content_md, content_hash,"
             " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
@@ -307,7 +309,6 @@ def commit_prepared(
                 now,
             ),
         )
-        doc_id = int(cur.lastrowid or 0)
         _insert_chunks(conn, doc_id, prepared.chunks, vectors, embed_model)
         conn.executemany(
             "INSERT OR IGNORE INTO doc_tags (doc_id, tag) VALUES (?, ?)",
@@ -673,10 +674,37 @@ def set_fallback(conn: Conn, state: SearchState, on: bool, actor: str) -> Fallba
     return FallbackResult(fallback_toggle=on)
 
 
+def export_database(conn: Conn, settings: Settings, actor: str) -> ExportResult:
+    """Write the PostgreSQL contents to the S3 snapshot (`snapshots/kb-latest.db.gz`) now.
+
+    The result is a SQLite file with ids and embeddings, restorable like any
+    snapshot (`kb.portable`). In SQLite mode the app already snapshots after every
+    write, so this refuses with `bad_request`. Needs `KB_BUCKET`. Writes an
+    `export` audit row once the upload succeeded. `bad_gateway` (502) when S3
+    or the copy fails.
+    """
+    if conn.dialect != "postgres":
+        raise ServiceError(
+            "bad_request", "the database is SQLite; it is snapshotted after every write", 400
+        )
+    if not settings.bucket:
+        raise ServiceError("bad_request", "KB_BUCKET is not set", 400)
+    target = f"s3://{settings.bucket}/{backup.SNAPSHOT_KEY}"
+    try:
+        counts = portable.export_to(conn, target, region=settings.aws_region).counts
+    except backup.BackupError as exc:
+        log.error("export failed", extra={"actor": actor, "error": str(exc)})
+        raise ServiceError("bad_gateway", "the export to S3 failed; see the server log", 502)
+    with db.transaction(conn):
+        _audit(conn, actor, "export", None, f"{counts['docs']} docs, {counts['chunks']} chunks")
+    log.info("database exported", extra={"actor": actor, "counts": counts})
+    return ExportResult(key=backup.SNAPSHOT_KEY, docs=counts["docs"], chunks=counts["chunks"])
+
+
 # --- update ----------------------------------------------------------------------
 
 
-def _require_doc(conn: Conn, doc_id: int) -> sqlite3.Row:
+def _require_doc(conn: Conn, doc_id: int) -> Any:
     row = conn.execute("SELECT * FROM docs WHERE id = ?", (doc_id,)).fetchone()
     if row is None:
         raise ServiceError("not_found", f"doc {doc_id} not found", 404)

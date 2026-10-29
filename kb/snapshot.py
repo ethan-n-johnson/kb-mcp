@@ -194,7 +194,14 @@ class Snapshotter:
 
 
 def from_settings(settings: Settings, *, client: Any | None = None) -> Snapshotter | None:
-    """Return a `Snapshotter` for `settings`, or None when snapshots are off."""
+    """Return a `Snapshotter` for `settings`, or None when snapshots are off.
+
+    Snapshots copy the SQLite file, so they are always off in PostgreSQL mode
+    (the S3 export, `kb.portable`, covers that case).
+    """
+    if settings.database_url is not None:
+        log.info("snapshots off", extra={"reason": "PostgreSQL mode"})
+        return None
     if settings.bucket is None or not settings.snapshots:
         reason = "KB_BUCKET is not set" if settings.bucket is None else "KB_SNAPSHOTS=off"
         log.info("snapshots off", extra={"reason": reason})

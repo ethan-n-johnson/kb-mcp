@@ -17,8 +17,10 @@ from kb.search import resolve
 from tests.conftest import AUTH, OpenApp
 from tests.corpus import EBS, ELB, S3, VPC
 from tests.fakes import FakeEmbedder, FakeReranker
-from tests.helpers import search, upload
+from tests.helpers import reopen, search, upload
 from tests.ops_helpers import LINUX_QUERY, add_gap, get_doc, post_doc, rows, scalar
+
+pytestmark = pytest.mark.dual
 
 LIFECYCLE_Q = "Which S3 feature moves old objects to Glacier automatically?"
 
@@ -228,13 +230,11 @@ def test_resolution_runs_after_the_write_is_committed(
     open_app: OpenApp, monkeypatch: pytest.MonkeyPatch, db_path
 ) -> None:
     """When it runs, the doc is already visible to other connections and audited."""
-    from kb import db
-
     seen: list[tuple[int, int]] = []
     real = resolve.resolve_gaps
 
     def spy(conn: Any, state: Any, doc_id: int) -> int:
-        other = db.connect(db_path)
+        other = reopen(db_path)
         try:
             seen.append(
                 (

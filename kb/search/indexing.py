@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
 import time
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 from starlette.concurrency import run_in_threadpool
 
 from kb import db
+from kb.store import Store, open_store
 from kb.config import Settings
 from kb.ingest.chunk import Chunk
 from kb.search.embedder import passage_text
@@ -40,7 +40,7 @@ def build_state(
 
 
 def _store_vectors(
-    conn: sqlite3.Connection, state: SearchState, rows: list[sqlite3.Row], vectors: np.ndarray
+    conn: Store, state: SearchState, rows: list[Any], vectors: np.ndarray
 ) -> list[tuple[int, int, np.ndarray]]:
     """Write `vectors` for `rows` in one transaction; return the rows that still existed."""
     model = state.embedder.model_name  # type: ignore[union-attr]
@@ -77,7 +77,7 @@ def embed_chunks(state: SearchState | None, title: str, chunks: Sequence[Chunk])
         return None
 
 
-def publish_doc(conn: sqlite3.Connection, state: SearchState, doc_id: int) -> int:
+def publish_doc(conn: Store, state: SearchState, doc_id: int) -> int:
     """Make the index hold exactly the doc's stored vectors (current model only).
 
     Replaces whatever the index had for the doc in one step, so an update that
@@ -108,7 +108,7 @@ def publish_doc(conn: sqlite3.Connection, state: SearchState, doc_id: int) -> in
     return len(rows)
 
 
-def backfill(conn: sqlite3.Connection, state: SearchState, batch_size: int = BACKFILL_BATCH) -> int:
+def backfill(conn: Store, state: SearchState, batch_size: int = BACKFILL_BATCH) -> int:
     """Embed every chunk whose vector is missing or made by another model.
 
     Works in batches (one transaction each) and returns the number embedded.
@@ -148,7 +148,7 @@ def _start_sync(state: SearchState) -> None:
         if model is not None:
             model.load()
     loaded_at = time.perf_counter()
-    conn = db.connect(state.db_path)
+    conn = open_store(state.settings)
     try:
         backfilled = backfill(conn, state)
         indexed = 0

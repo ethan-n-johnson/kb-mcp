@@ -9,7 +9,6 @@ cannot take a form post). See `kb.ui_add` for the add page.
 
 from __future__ import annotations
 
-import sqlite3
 
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse
@@ -21,6 +20,7 @@ from kb.schemas import SearchResult
 from kb.ui_add import router as add_router
 from kb.ui_common import Conn, Search, page, ui_errors
 from kb.search.state import SearchState
+from kb.store import Store
 
 router = APIRouter(include_in_schema=False)
 router.include_router(add_router)
@@ -56,7 +56,7 @@ async def search_fragment(
 
 @router.get("/docs/{doc_id}", response_class=HTMLResponse)
 @ui_errors
-def doc_page(request: Request, doc_id: int, conn: sqlite3.Connection = Conn) -> HTMLResponse:
+def doc_page(request: Request, doc_id: int, conn: Store = Conn) -> HTMLResponse:
     """One document: metadata, sanitized Markdown, and the Verify button."""
     return page(request, "doc.html", doc=service.get(conn, doc_id=doc_id))
 
@@ -64,7 +64,7 @@ def doc_page(request: Request, doc_id: int, conn: sqlite3.Connection = Conn) -> 
 @router.post("/ui/docs/{doc_id}/verify", response_class=HTMLResponse)
 @ui_errors
 def verify_fragment(
-    request: Request, doc_id: int, view: str = Form("box"), conn: sqlite3.Connection = Conn
+    request: Request, doc_id: int, view: str = Form("box"), conn: Store = Conn
 ) -> HTMLResponse:
     """Verify a doc as the calling token and return the new verified line.
 
@@ -86,7 +86,7 @@ def add_page(request: Request) -> HTMLResponse:
 @router.get("/maintenance", response_class=HTMLResponse)
 @ui_errors
 def maintenance_page(
-    request: Request, days: int = Query(STALE_DAYS, ge=0, le=3650), conn: sqlite3.Connection = Conn
+    request: Request, days: int = Query(STALE_DAYS, ge=0, le=3650), conn: Store = Conn
 ) -> HTMLResponse:
     """Stale docs, top gaps, the last 20 audit rows and the fallback toggle."""
     return page(
@@ -104,7 +104,7 @@ def maintenance_page(
 def fallback_fragment(
     request: Request,
     on: bool = Form(...),
-    conn: sqlite3.Connection = Conn,
+    conn: Store = Conn,
     search: SearchState = Search,
 ) -> HTMLResponse:
     """Switch forced keyword search on or off and return the toggle box."""
