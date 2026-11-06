@@ -14,7 +14,8 @@ from tests.test_infra import load, render_user_data
 
 NETWORK = load("network.yaml")["Resources"]
 DATA = load("data.yaml")["Resources"]
-APP = load("app.yaml")["Resources"]
+APP_TEMPLATE = load("app.yaml")
+APP = APP_TEMPLATE["Resources"]
 ALL = {"network": NETWORK, "data": DATA, "app": APP}
 
 
@@ -72,7 +73,9 @@ def test_instances_are_private_and_require_imdsv2() -> None:
     }
     subnets = APP["AppAsg"]["Properties"]["VPCZoneIdentifier"]
     assert all("Private" in s["Fn::ImportValue"] for s in subnets)
-    assert APP["AppAsg"]["Properties"]["MaxSize"] in (1, "1")
+    # The group size comes from the Capacity table: 1 in sqlite mode, at most 4 in postgres mode.
+    assert APP["AppAsg"]["Properties"]["MaxSize"] == {"Fn::FindInMap": ["Capacity", {"Ref": "DatabaseMode"}, "Max"]}
+    assert max(int(row["Max"]) for row in APP_TEMPLATE["Mappings"]["Capacity"].values()) == 4
     assert "KeyName" not in data  # no SSH key pair
 
 

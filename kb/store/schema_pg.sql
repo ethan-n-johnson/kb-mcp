@@ -67,3 +67,23 @@ CREATE TABLE IF NOT EXISTS audit_log (
     at          TIMESTAMPTZ NOT NULL,
     note        TEXT
 );
+
+-- State that more than one instance shares (phase 22). Upload tickets are stored
+-- as a SHA-256 hash, never the ticket itself; `tags` is a JSON list.
+CREATE TABLE IF NOT EXISTS upload_tickets (
+    token_hash  TEXT PRIMARY KEY,
+    actor       TEXT NOT NULL,
+    filename    TEXT NOT NULL,
+    title       TEXT,
+    tags        TEXT NOT NULL DEFAULT '[]',
+    force       BOOLEAN NOT NULL DEFAULT FALSE,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    used_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_upload_tickets_expires ON upload_tickets(expires_at);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL
+);

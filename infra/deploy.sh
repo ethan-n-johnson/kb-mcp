@@ -25,7 +25,7 @@
 #   KB_CLOUDFRONT_PREFIX_LIST_ID  CloudFront origin-facing prefix list (pl-...),
 #                                 recorded in docs/PROGRESS.md in phase 00
 #   KB_ALERT_EMAIL                address for the alarm emails
-# and takes four optional values:
+# and takes five optional values:
 #   KB_INSTANCE_PROFILE           existing instance profile for the app instances,
 #                                 default myS3Role (the only profile the Cloud
 #                                 Architecting sandbox lets you pass; Learner Lab
@@ -38,7 +38,11 @@
 #   KB_DATABASE_MODE              sqlite (default) or postgres, where the knowledge
 #                                 base lives; postgres needs the kb-db stack (the
 #                                 instance joins kb-DbClientSg and imports the S3
-#                                 snapshot into an empty RDS database at boot)
+#                                 snapshot into an empty RDS database at boot);
+#                                 postgres also runs 2 to 4 instances
+#   KB_SEARCH_RATE                search rate limit per client address and per
+#                                 instance (default 30/minute), e.g. 600/minute for
+#                                 a load test; passed only when set
 set -euo pipefail
 
 REGION="us-east-1"
@@ -140,14 +144,17 @@ case "$1" in
         exit 2
         ;;
     esac
-    deploy_stack app --parameter-overrides \
-      "ImageTag=$2" \
-      "CloudFrontPrefixListId=$KB_CLOUDFRONT_PREFIX_LIST_ID" \
-      "AlertEmail=$KB_ALERT_EMAIL" \
-      "MetricsMode=${KB_METRICS_MODE:-api}" \
-      "InstanceProfileName=${KB_INSTANCE_PROFILE:-myS3Role}" \
-      "ExtensionOrigin=${KB_EXTENSION_ORIGIN:-}" \
+    app_params=(
+      "ImageTag=$2"
+      "CloudFrontPrefixListId=$KB_CLOUDFRONT_PREFIX_LIST_ID"
+      "AlertEmail=$KB_ALERT_EMAIL"
+      "MetricsMode=${KB_METRICS_MODE:-api}"
+      "InstanceProfileName=${KB_INSTANCE_PROFILE:-myS3Role}"
+      "ExtensionOrigin=${KB_EXTENSION_ORIGIN:-}"
       "DatabaseMode=${KB_DATABASE_MODE:-sqlite}"
+    )
+    [ -z "${KB_SEARCH_RATE:-}" ] || app_params+=("SearchRate=$KB_SEARCH_RATE")
+    deploy_stack app --parameter-overrides "${app_params[@]}"
     print_output AlbDnsName "ALB DNS name"
     print_output DistributionDomainName "CloudFront domain name"
     echo "Confirm the SNS subscription email sent to $KB_ALERT_EMAIL (alarm emails only arrive after that)."

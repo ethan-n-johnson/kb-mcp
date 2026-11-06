@@ -29,6 +29,7 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -71,7 +72,7 @@ from kb.schemas import (
 )
 from kb.search import dupes, indexing, pipeline, resolve
 from kb.search.state import SearchState
-from kb.store import Store
+from kb.store import Store, pg_state
 
 log = logging.getLogger(__name__)
 
@@ -475,6 +476,7 @@ UPLOAD_EXTENSIONS = (".pdf", ".md", ".markdown", ".txt", ".html", ".htm")
 
 
 def create_upload_link(
+    conn: Conn,
     actor: str,
     filename: str,
     base_url: str,
@@ -482,10 +484,12 @@ def create_upload_link(
     title: str | None = None,
     tags: list[str] | None = None,
     force: bool = False,
-    store: uploads.TicketStore | None = None,
+    store: uploads.TicketStore | uploads.DbTicketStore | None = None,
 ) -> UploadLink:
     """Issue a one-time link through which `actor` can send one file (see `kb/uploads.py`).
 
+    The ticket is kept in the database in PostgreSQL mode (any instance can
+    take it) and in process memory in SQLite mode, unless `store` is given.
     `filename` only names the file (its extension picks the format); a path is
     reduced to its last part. `base_url` is the public address of this server
     (`KB_PUBLIC_URL`, or the request's own base URL). Raises `ServiceError`
@@ -499,7 +503,7 @@ def create_upload_link(
     clean_title = (title or "").strip() or None
     if clean_title is not None and len(clean_title) > 500:
         raise ServiceError("bad_request", "title must be at most 500 characters", 400)
-    ticket, ttl = (store or uploads.STORE).issue(
+    ticket, ttl = (store or uploads.store_for(conn)).issue(
         actor, name, title=clean_title, tags=_normalize_tags(tags or []), force=force
     )
     url = f"{base_url.rstrip('/')}/api/uploads/{ticket}"
@@ -525,7 +529,7 @@ def upload_with_ticket(
     data: bytes,
     *,
     search_state: SearchState | None = None,
-    store: uploads.TicketStore | None = None,
+    store: uploads.TicketStore | uploads.DbTicketStore | None = None,
 ) -> UploadResult:
     """Store `data` as the file a ticket was issued for, as the ticket's owner.
 
@@ -533,7 +537,7 @@ def upload_with_ticket(
     `ServiceError` `bad_ticket` (404) for an unknown, used or expired ticket and
     `bad_request` for an empty body; conversion errors are `IngestError`.
     """
-    issued = (store or uploads.STORE).take(ticket)
+    issued = (store or uploads.store_for(conn)).take(ticket)
     if issued is None:
         raise ServiceError(
             "bad_ticket", "this upload link is unknown, already used or expired; ask for a new one", 404
@@ -664,14 +668,20 @@ def set_fallback(conn: Conn, state: SearchState, on: bool, actor: str) -> Fallba
     """Turn the keyword-fallback toggle on or off and write an audit row.
 
     While on, every search uses keyword mode even if the models are healthy
-    (used to demo the fallback). The flag lives in process memory and resets
-    to off on restart.
+    (used to demo the fallback). In SQLite mode the flag lives in process memory
+    and resets to off on restart. In PostgreSQL mode it is the `fallback` row of
+    the `settings` table, written in the same transaction as the audit row; this
+    instance sees the change at once and every other instance within
+    `SearchState.TOGGLE_CACHE_SECONDS` (5 s).
     """
+    with conn.transaction() if conn.dialect == "postgres" else nullcontext():
+        if conn.dialect == "postgres":
+            pg_state.set_setting(conn, "fallback", "on" if on else "off")
+        conn.execute(
+            "INSERT INTO audit_log (token_name, action, doc_id, at) VALUES (?, ?, NULL, ?)",
+            (actor, "fallback_on" if on else "fallback_off", db.utcnow()),
+        )
     state.fallback_toggle = on
-    conn.execute(
-        "INSERT INTO audit_log (token_name, action, doc_id, at) VALUES (?, ?, NULL, ?)",
-        (actor, "fallback_on" if on else "fallback_off", db.utcnow()),
-    )
     log.info("fallback toggle changed", extra={"fallback_toggle": on, "actor": actor})
     return FallbackResult(fallback_toggle=on)
 

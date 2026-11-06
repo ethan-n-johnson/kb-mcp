@@ -169,10 +169,12 @@ def public_base_url(request: Request) -> str:
 
 
 @router.post("/upload-links", status_code=201, response_model=UploadLink, responses={400: _ERRORS, 401: _ERRORS})
-def create_upload_link(body: UploadLinkRequest, request: Request, actor: str = Writer) -> UploadLink:
+def create_upload_link(
+    body: UploadLinkRequest, request: Request, conn=Conn, actor: str = Writer
+) -> UploadLink:
     """A one-time link for sending one whole file (same as the MCP `upload_file` tool)."""
     return service.create_upload_link(
-        actor, body.filename, public_base_url(request),
+        conn, actor, body.filename, public_base_url(request),
         title=body.title, tags=body.tags, force=body.force,
     )
 

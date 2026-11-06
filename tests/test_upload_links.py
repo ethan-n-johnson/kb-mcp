@@ -72,6 +72,11 @@ def test_pending_tickets_are_capped_oldest_first() -> None:
     assert all(store.take(t) is not None for t in others)
 
 
+def test_sqlite_mode_keeps_tickets_in_process_memory(conn: Any) -> None:
+    assert conn.dialect == "sqlite"
+    assert uploads.store_for(conn) is uploads.STORE
+
+
 # --- over MCP (HTTP) ---------------------------------------------------------------------
 
 

@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
-from typing import Protocol, Sequence
+from typing import Callable, Protocol, Sequence
 
 import numpy as np
 
@@ -65,13 +66,63 @@ class SearchState:
 
     `embedder` is None when models are off; `reranker` is None when models are
     off or `KB_RERANK=off` (candidates are then ranked by cosine).
+
+    The keyword-fallback toggle (`fallback_toggle`) is process memory in SQLite
+    mode. In PostgreSQL mode it is the `fallback` row of the `settings` table,
+    shared by every instance: reading the property looks at the table at most
+    every `TOGGLE_CACHE_SECONDS` (by `clock`), and writing it sets the local
+    value at once (`service.set_fallback` writes the row). A failed read keeps
+    the last known value and never raises, so `/healthz` and search do not
+    depend on it.
     """
+
+    TOGGLE_CACHE_SECONDS = 5.0
 
     settings: Settings
     embedder: EmbedderLike | None = None
     reranker: RerankerLike | None = None
     index: VectorIndex = field(default_factory=VectorIndex)
-    fallback_toggle: bool = False
+    clock: Callable[[], float] = time.monotonic
+    _toggle: bool = field(default=False, init=False, repr=False)
+    _toggle_read_at: float | None = field(default=None, init=False, repr=False)
+    _toggle_error_logged: bool = field(default=False, init=False, repr=False)
+
+    @property
+    def fallback_toggle(self) -> bool:
+        """True while searches are forced to keyword mode (see the class docstring)."""
+        if self.settings.dialect == "postgres":
+            now = self.clock()
+            read_at = self._toggle_read_at
+            if read_at is None or now - read_at >= self.TOGGLE_CACHE_SECONDS:
+                self._toggle_read_at = now  # also after a failure: retry in 5 s, not on every call
+                self._refresh_toggle()
+        return self._toggle
+
+    @fallback_toggle.setter
+    def fallback_toggle(self, on: bool) -> None:
+        self._toggle = on
+        if self.settings.dialect == "postgres":
+            self._toggle_read_at = self.clock()
+
+    def _refresh_toggle(self) -> None:
+        from kb.store import open_store, pg_state
+
+        try:
+            store = open_store(self.settings)
+            try:
+                value = pg_state.get_setting(store, "fallback")
+            finally:
+                store.close()
+        except Exception as exc:
+            if not self._toggle_error_logged:
+                log.warning(
+                    "cannot read the fallback toggle; keeping the last value",
+                    extra={"error": type(exc).__name__},
+                )
+                self._toggle_error_logged = True
+            return
+        self._toggle_error_logged = False
+        self._toggle = value == "on"
 
     @property
     def db_path(self) -> str:

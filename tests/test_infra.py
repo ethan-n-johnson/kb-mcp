@@ -80,7 +80,7 @@ def of_type(resources: dict[str, Any], rtype: str) -> dict[str, Any]:
 # --- user data ----------------------------------------------------------------------------
 
 PSEUDO = {"AWS::Region": "us-east-1", "AWS::StackName": "kb-app"}
-PARAMETER_VALUES = {"ImageTag": "abc1234", "MetricsMode": "api", "ExtensionOrigin": "", "DatabaseMode": "sqlite"}
+PARAMETER_VALUES = {"ImageTag": "abc1234", "MetricsMode": "api", "ExtensionOrigin": "", "DatabaseMode": "sqlite", "SearchRate": "30/minute"}
 
 
 def user_data_parts(resources: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -351,15 +351,19 @@ def alarms(resources: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return found
 
 
-def test_exactly_the_six_alarms_exist(resources: dict[str, Any]) -> None:
-    assert set(alarms(resources)) == {
-        "kb-keyword-mode",
-        "kb-unhealthy-host",
-        "kb-no-healthy-host",
-        "kb-5xx",
-        "kb-high-latency",
-        "kb-memory",
-    }
+SIX_ALARMS = {
+    "kb-keyword-mode",
+    "kb-unhealthy-host",
+    "kb-no-healthy-host",
+    "kb-5xx",
+    "kb-high-latency",
+    "kb-memory",
+}
+
+
+def test_exactly_the_six_alarms_exist_in_sqlite_mode_and_seven_in_postgres_mode(app: dict[str, Any]) -> None:
+    assert set(alarms(deployed(app, "sqlite"))) == SIX_ALARMS
+    assert set(alarms(deployed(app, "postgres"))) == SIX_ALARMS | {"kb-capacity-max"}
 
 
 def test_every_alarm_notifies_the_topic_on_alarm_and_on_ok(resources: dict[str, Any]) -> None:
@@ -386,6 +390,7 @@ def test_alarm_thresholds_match_the_phase_file(resources: dict[str, Any]) -> Non
     assert shape(a["kb-no-healthy-host"]) == ("Minimum", 60, 3, 3, 1, lt, "breaching")
     assert shape(a["kb-5xx"]) == ("Sum", 300, 1, None, 5, gte, "notBreaching")
     assert shape(a["kb-memory"]) == ("Average", 300, 2, 2, 85, gt, "notBreaching")
+    assert shape(a["kb-capacity-max"]) == ("Maximum", 60, 1, None, 4, gte, "notBreaching")
     latency = a["kb-high-latency"]
     assert (latency["ExtendedStatistic"], latency["Period"], latency["EvaluationPeriods"]) == ("p90", 300, 1)
     assert (latency["Threshold"], latency["ComparisonOperator"], latency["TreatMissingData"]) == (2000, gt, "notBreaching")
@@ -639,7 +644,8 @@ def test_data_is_a_plain_directory_not_a_mount(resources: dict[str, Any]) -> Non
     assert not re.search(r"dnf install -y .*(efs|nfs)", rendered)
 
 
-def test_asg_spans_both_private_subnets_and_stays_at_one_instance(resources: dict[str, Any]) -> None:
+def test_asg_spans_both_private_subnets_and_stays_at_one_instance_in_sqlite_mode(app: dict[str, Any]) -> None:
+    resources = deployed(app, "sqlite")
     asg = resources["AppAsg"]["Properties"]
     assert asg["VPCZoneIdentifier"] == [
         {"Fn::ImportValue": "kb-PrivateSubnetA"},
@@ -1306,6 +1312,146 @@ def test_user_data_passes_the_cloudfront_address_for_upload_links(resources: dic
     template, variables = user_data_parts(resources)
     assert variables["PublicHost"] == {"Fn::GetAtt": ["Distribution", "DomainName"]}
     assert "-e KB_PUBLIC_URL=https://VALUE_PUBLICHOST" in render_user_data(resources)
+
+
+
+# --- phase 22: scale-out -------------------------------------------------------------------
+
+
+def resolve(node: Any, template: dict[str, Any], mode: str) -> Any:
+    """Resolve what the template decides from `DatabaseMode`: Ref, FindInMap, If and NoValue.
+
+    Other intrinsics (GetAtt, ImportValue, Sub, ...) stay as they are.
+    """
+    if isinstance(node, list):
+        return [x for x in (resolve(i, template, mode) for i in node) if x != {"Ref": "AWS::NoValue"}]
+    if not isinstance(node, dict):
+        return node
+    if set(node) == {"Ref"} and node["Ref"] == "DatabaseMode":
+        return mode
+    if set(node) == {"Fn::FindInMap"}:
+        table, key, field = (resolve(x, template, mode) for x in node["Fn::FindInMap"])
+        return template["Mappings"][table][key][field]
+    if set(node) == {"Fn::If"}:
+        condition, yes, no = node["Fn::If"]
+        assert condition == "UsePostgres", condition
+        return resolve(yes if mode == "postgres" else no, template, mode)
+    out = {}
+    for key, value in node.items():
+        resolved = resolve(value, template, mode)
+        if resolved != {"Ref": "AWS::NoValue"}:
+            out[key] = resolved
+    return out
+
+
+def deployed(app: dict[str, Any], mode: str) -> dict[str, Any]:
+    """The resources that exist in `mode` (conditions applied), with `DatabaseMode` resolved."""
+    kept = {
+        name: res for name, res in app["Resources"].items()
+        if res.get("Condition") in (None, "UsePostgres" if mode == "postgres" else None)
+    }
+    return resolve(kept, app, mode)
+
+
+def asg_shape(app: dict[str, Any], mode: str) -> dict[str, Any]:
+    asg = deployed(app, mode)["AppAsg"]
+    props = asg["Properties"]
+    rolling = asg["UpdatePolicy"]["AutoScalingRollingUpdate"]
+    return {
+        "min": int(props["MinSize"]), "max": int(props["MaxSize"]), "desired": int(props["DesiredCapacity"]),
+        "in_service": int(rolling["MinInstancesInService"]), "batch": rolling["MaxBatchSize"],
+        "wait": rolling["WaitOnResourceSignals"], "signals": int(asg["CreationPolicy"]["ResourceSignal"]["Count"]),
+    }
+
+
+def test_sqlite_mode_keeps_the_phase_1_group(app: dict[str, Any]) -> None:
+    assert asg_shape(app, "sqlite") == {
+        "min": 1, "max": 1, "desired": 1, "in_service": 0, "batch": 1, "wait": True, "signals": 1,
+    }
+    resources = deployed(app, "sqlite")
+    assert "MetricsCollection" not in resources["AppAsg"]["Properties"]
+    assert not of_type(resources, "AWS::AutoScaling::ScalingPolicy")
+    assert "CapacityMaxAlarm" not in resources and "kb-capacity-max" not in alarms(resources)
+
+
+def test_postgres_mode_runs_two_to_four_instances_and_replaces_one_at_a_time(app: dict[str, Any]) -> None:
+    shape = asg_shape(app, "postgres")
+    assert shape == {"min": 2, "max": 4, "desired": 2, "in_service": 1, "batch": 1, "wait": True, "signals": 2}
+    assert shape["signals"] == shape["desired"]
+    props = deployed(app, "postgres")["AppAsg"]["Properties"]
+    assert props["HealthCheckType"] == "ELB" and props["HealthCheckGracePeriod"] == 600
+    assert props["VPCZoneIdentifier"] == [
+        {"Fn::ImportValue": "kb-PrivateSubnetA"},
+        {"Fn::ImportValue": "kb-PrivateSubnetB"},
+    ]
+
+
+def test_no_mode_can_exceed_four_instances(app: dict[str, Any]) -> None:
+    for mode in app["Mappings"]["Capacity"]:
+        assert int(app["Mappings"]["Capacity"][mode]["Max"]) <= 4
+    assert set(app["Mappings"]["Capacity"]) == set(app["Parameters"]["DatabaseMode"]["AllowedValues"])
+
+
+def test_postgres_mode_collects_the_in_service_metric_for_the_capacity_alarm(app: dict[str, Any]) -> None:
+    resources = deployed(app, "postgres")
+    assert resources["AppAsg"]["Properties"]["MetricsCollection"] == [
+        {"Granularity": "1Minute", "Metrics": ["GroupInServiceInstances"]}
+    ]
+    alarm = alarms(resources)["kb-capacity-max"]
+    assert (alarm["Namespace"], alarm["MetricName"]) == ("AWS/AutoScaling", "GroupInServiceInstances")
+    assert dims(alarm) == {"AutoScalingGroupName": {"Ref": "AppAsg"}}
+
+
+def test_postgres_mode_scales_on_average_cpu(app: dict[str, Any]) -> None:
+    policies = of_type(deployed(app, "postgres"), "AWS::AutoScaling::ScalingPolicy")
+    assert len(policies) == 1
+    props = next(iter(policies.values()))["Properties"]
+    assert props["AutoScalingGroupName"] == {"Ref": "AppAsg"}
+    assert props["PolicyType"] == "TargetTrackingScaling" and props["EstimatedInstanceWarmup"] == 600
+    config = props["TargetTrackingConfiguration"]
+    assert config["PredefinedMetricSpecification"] == {"PredefinedMetricType": "ASGAverageCPUUtilization"}
+    assert config["TargetValue"] == 50
+
+
+def test_postgres_mode_keeps_the_client_group_and_the_host_alarms(app: dict[str, Any]) -> None:
+    resources = deployed(app, "postgres")
+    groups = resources["LaunchTemplate"]["Properties"]["LaunchTemplateData"]["NetworkInterfaces"][0]["Groups"]
+    assert groups == [{"Ref": "AppSg"}, {"Fn::ImportValue": "kb-DbClientSg"}]
+    assert {"kb-unhealthy-host", "kb-no-healthy-host"} <= set(alarms(resources))
+    assert deployed(app, "sqlite")["LaunchTemplate"]["Properties"]["LaunchTemplateData"]["NetworkInterfaces"][0][
+        "Groups"
+    ] == [{"Ref": "AppSg"}]
+
+
+def test_target_group_drains_in_30_seconds_and_has_no_stickiness(resources: dict[str, Any]) -> None:
+    attrs = {a["Key"]: a["Value"] for a in resources["TargetGroup"]["Properties"]["TargetGroupAttributes"]}
+    assert attrs["deregistration_delay.timeout_seconds"] == "30"
+    assert not [k for k in attrs if k.startswith("stickiness")]
+    assert "stickiness.enabled" not in attrs
+
+
+def test_search_rate_is_a_parameter_passed_to_the_container(app: dict[str, Any], resources: dict[str, Any]) -> None:
+    param = app["Parameters"]["SearchRate"]
+    assert param["Type"] == "String" and param["Default"] == "30/minute"
+    pattern = param["AllowedPattern"]
+    for good in ("30/minute", "600/minute", "5/second", "1000/hour", "10/day"):
+        assert re.fullmatch(pattern, good), good
+    for bad in ("", "30", "30/", "/minute", "30/minutes", "30 / minute", '30/minute"; reboot #', "30/minute\n", "-1/minute"):
+        assert not re.fullmatch(pattern, bad), bad
+    template, _ = user_data_parts(resources)
+    assert "-e KB_SEARCH_RATE=${SearchRate}" in template
+    assert "-e KB_SEARCH_RATE=30/minute" in render_user_data(resources, SearchRate="30/minute")
+    assert "per instance" in param["Description"]
+
+
+def test_deploy_app_passes_the_search_rate_only_when_set(stub_bin: Path) -> None:
+    env = {"KB_CLOUDFRONT_PREFIX_LIST_ID": "pl-1", "KB_ALERT_EMAIL": "me@example.com"}
+    run_script(DEPLOY, ["app", "abc1234"], stub_bin, env)
+    unset = next(c for c in calls(stub_bin) if "cloudformation deploy" in c)
+    assert not any(p.startswith("SearchRate=") for p in unset.split())
+    run_script(DEPLOY, ["app", "abc1234"], stub_bin, env | {"KB_SEARCH_RATE": "600/minute"})
+    deploy = [c for c in calls(stub_bin) if "cloudformation deploy" in c][-1]
+    assert "SearchRate=600/minute" in deploy.split()
 
 
 # --- infra/db.yaml (phase 19) -------------------------------------------------------------

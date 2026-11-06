@@ -11,17 +11,25 @@ server stores it through the normal `service.upload` path as the token's owner.
 A ticket works like an S3 presigned URL: whoever holds it may upload one file,
 once, within `TICKET_TTL_SECONDS`, as the token that asked for it. It carries
 no other right, and the write token itself never leaves the MCP connection.
-Tickets live in process memory, which is fine with exactly one uvicorn worker;
-a restart drops the pending ones (the client asks for a new link).
+Where the tickets live depends on the database. With SQLite there is one
+instance and one uvicorn worker, so `TicketStore` keeps them in process memory;
+a restart drops the pending ones (the client asks for a new link). With
+PostgreSQL several instances share the work, so `DbTicketStore` keeps them in
+the `upload_tickets` table (as a SHA-256 of the ticket, never the ticket) and
+uses them up with one `UPDATE ... RETURNING`, so a link issued by one instance
+works once on any instance. `store_for(conn)` picks the right one.
 """
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable
+
+from kb.store import Store, pg_state
 
 TICKET_TTL_SECONDS = 15 * 60
 MAX_PENDING = 50
@@ -103,5 +111,65 @@ class TicketStore:
             del self._tickets[key]
 
 
+class DbTicketStore:
+    """The same tickets in the PostgreSQL `upload_tickets` table, shared by all instances.
+
+    Expiry, single use and the pending cap are decided by the database (its
+    clock, one statement for `take`), so no process-local state is involved.
+    Cheap to build: make one per request around the request's connection.
+    """
+
+    def __init__(
+        self, store: Store, ttl: float = TICKET_TTL_SECONDS, max_pending: int = MAX_PENDING
+    ) -> None:
+        self.store = store
+        self.ttl = ttl
+        self.max_pending = max_pending
+
+    @staticmethod
+    def _hash(token: str) -> str:
+        return hashlib.sha256(token.encode()).hexdigest()
+
+    def issue(
+        self,
+        actor: str,
+        filename: str,
+        *,
+        title: str | None = None,
+        tags: list[str] | None = None,
+        force: bool = False,
+    ) -> tuple[str, float]:
+        """Create a ticket; returns `(ticket, seconds until it expires)`.
+
+        Expired rows are pruned first; when `max_pending` are still open the
+        oldest are dropped, as in the in-memory store.
+        """
+        token = secrets.token_urlsafe(32)
+        pg_state.issue_ticket(
+            self.store, self._hash(token), actor, filename,
+            title=title, tags=list(tags or ()), force=force,
+            ttl=self.ttl, max_pending=self.max_pending,
+        )
+        return token, self.ttl
+
+    def take(self, token: str) -> Ticket | None:
+        """Use up the ticket and return it, or None if it is unknown, used or expired."""
+        got = pg_state.take_ticket(self.store, self._hash(token))
+        return None if got is None else Ticket(**got)
+
+    def pending(self) -> int:
+        return pg_state.pending_tickets(self.store)
+
+    def clear(self) -> None:
+        pg_state.clear_tickets(self.store)
+
+
 STORE = TicketStore()
-"""The process-wide store (one uvicorn worker, so one store)."""
+"""The in-memory store used in SQLite mode (one uvicorn worker, so one store)."""
+
+
+def store_for(conn: Store) -> TicketStore | DbTicketStore:
+    """The ticket store for the database `conn` is open on."""
+    if conn.dialect == "postgres":
+        return DbTicketStore(conn)
+    return STORE

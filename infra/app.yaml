@@ -53,8 +53,33 @@ Parameters:
       - postgres
     Description: Where the knowledge base lives. sqlite (default until phase 22) keeps the database on the instance root volume, snapshotted to S3 after every write. postgres uses the RDS instance of the kb-db stack (which must exist; the instance joins kb-DbClientSg), reads the connection URL from s3://<bucket>/config/database-url, and on an empty database imports snapshots/kb-latest.db.gz at boot. infra/deploy.sh reads it from KB_DATABASE_MODE.
 
+  SearchRate:
+    Type: String
+    Default: 30/minute
+    AllowedPattern: '^[0-9]+/(second|minute|hour|day)$'
+    ConstraintDescription: A rate such as 30/minute (a number, a slash and second, minute, hour or day).
+    Description: Search rate limit per client address (KB_SEARCH_RATE). It is counted per instance, so with several instances (postgres mode) the effective limit is this value times the instance count. Raise it for the phase 23 load test. infra/deploy.sh reads it from KB_SEARCH_RATE.
+
 Conditions:
   UsePostgres: !Equals [!Ref DatabaseMode, postgres]
+
+# Group size per DatabaseMode. A table (FindInMap) rather than Fn::If because
+# CloudFormation documents Ref and FindInMap, but not Fn::If, inside CreationPolicy.
+# Never raise Max above 4: the sandbox suspends the account past 9 instances.
+Mappings:
+  Capacity:
+    sqlite:
+      Min: '1'
+      Max: '1'
+      Desired: '1'
+      InService: 0
+      Signals: 1
+    postgres:
+      Min: '2'
+      Max: '4'
+      Desired: '2'
+      InService: 1
+      Signals: 2
 
 Resources:
   # ---------------------------------------------------------------- Networking
@@ -697,6 +722,7 @@ Resources:
                 -e KB_METRICS_MODE=${MetricsMode} \
                 -e "KB_EXTENSION_ORIGIN=${ExtensionOrigin}" \
                 -e KB_PROXY_HOPS=2 \
+                -e KB_SEARCH_RATE=${SearchRate} \
                 -e KB_PUBLIC_URL=https://${PublicHost} \
                 "${!DB_OPTS[@]}" \
                 "${!LOG_OPTS[@]}" \
@@ -739,11 +765,16 @@ Resources:
               PublicHost: !GetAtt Distribution.DomainName
 
   # --------------------------------------------------------- Auto Scaling group
-  # Max stays at 1: the vector index lives in process memory and SQLite has a
-  # single writer. The group spans both private subnets, so a replacement can
-  # land in the other AZ; it restores the database from the S3 snapshot. The image
-  # tag is part of the user data, so a new ImageTag creates a new launch template
-  # version and triggers the rolling update.
+  # The size depends on DatabaseMode (Mappings: Capacity). sqlite: exactly 1
+  # instance, because the vector index lives in process memory and SQLite has a
+  # single writer; a replacement restores the database from the S3 snapshot.
+  # postgres: 2 to 4 instances, any of which can answer any request (data, vectors,
+  # upload tickets and the fallback toggle are in RDS), spread over both private
+  # subnets, scaling on average CPU (AppScalingPolicy). Never above 4: the sandbox
+  # suspends the account past 9 instances. A rolling update replaces one instance at
+  # a time and keeps MinInstancesInService serving (sqlite: 0, so a deploy takes the
+  # service down briefly; postgres: 1). The image tag is part of the user data, so a
+  # new ImageTag creates a new launch template version and triggers the update.
   AppAsg:
     Type: AWS::AutoScaling::AutoScalingGroup
     DependsOn:
@@ -751,18 +782,24 @@ Resources:
       - Listener
     CreationPolicy:
       ResourceSignal:
-        Count: 1
+        Count: !FindInMap [Capacity, !Ref DatabaseMode, Signals]
         Timeout: PT15M
     UpdatePolicy:
       AutoScalingRollingUpdate:
-        MinInstancesInService: 0
+        MinInstancesInService: !FindInMap [Capacity, !Ref DatabaseMode, InService]
         MaxBatchSize: 1
         WaitOnResourceSignals: true
         PauseTime: PT15M
     Properties:
-      MinSize: '1'
-      MaxSize: '1'
-      DesiredCapacity: '1'
+      MinSize: !FindInMap [Capacity, !Ref DatabaseMode, Min]
+      MaxSize: !FindInMap [Capacity, !Ref DatabaseMode, Max]
+      DesiredCapacity: !FindInMap [Capacity, !Ref DatabaseMode, Desired]
+      MetricsCollection: !If
+        - UsePostgres
+        - - Granularity: 1Minute
+            Metrics:
+              - GroupInServiceInstances
+        - !Ref AWS::NoValue
       VPCZoneIdentifier:
         - !ImportValue kb-PrivateSubnetA
         - !ImportValue kb-PrivateSubnetB
@@ -784,6 +821,44 @@ Resources:
         - Key: Project
           Value: kb-mcp
           PropagateAtLaunch: true
+
+  # Scale on average CPU across the group (a basic EC2 metric, so it needs no
+  # instance role permissions). The warmup covers image load plus model load.
+  AppScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Condition: UsePostgres
+    Properties:
+      AutoScalingGroupName: !Ref AppAsg
+      PolicyType: TargetTrackingScaling
+      EstimatedInstanceWarmup: 600
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 50
+
+  # Emails when the group has scaled out to its maximum (the demo account has no
+  # headroom beyond 4 instances). Needs MetricsCollection on the group.
+  CapacityMaxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: UsePostgres
+    Properties:
+      AlarmName: kb-capacity-max
+      AlarmDescription: The Auto Scaling group is running its maximum of 4 instances (CPU stayed above target). Expected during the load test.
+      Namespace: AWS/AutoScaling
+      MetricName: GroupInServiceInstances
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AppAsg
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 4
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
 
 Outputs:
   DistributionDomainName:
