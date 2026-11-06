@@ -15,6 +15,7 @@ from tests.fakes import FakeEmbedder
 from tests.helpers import (
     client_searchable_doc_ids,
     db_conn,
+    fresh_health,
     fts_count,
     load_corpus,
     reopen,
@@ -64,7 +65,7 @@ def test_tags_only_does_not_re_embed_or_touch_chunks(open_app: OpenApp) -> None:
         resp = patch(client, doc_id, tags=["storage", "ebs", " new "])
         after = get_doc(client, doc_id)
         ids_after = chunk_ids(client, doc_id)
-        index_size = client.get("/healthz").json()["index_size"]
+        index_size = fresh_health(client)["index_size"]
     assert resp.status_code == 200
     assert resp.json() == {
         "status": "updated", "doc_id": doc_id, "rechunked": False, "chunks": before["chunk_count"]
@@ -133,7 +134,7 @@ def test_content_change_replaces_chunks_and_search_finds_the_new_text(open_app: 
         lock = search(client, "How does Object Lock stop an object from being deleted?")
         stale_hit = search(client, "Which S3 feature moves old objects to Glacier automatically?")
         total_chunks = scalar(client, "SELECT count(*) FROM chunks")
-        health = client.get("/healthz").json()
+        health = fresh_health(client)
     assert resp.json() == {"status": "updated", "doc_id": doc_id, "rechunked": True, "chunks": 2}
     assert not set(old_ids) & set(new_ids)  # chunks were replaced, not patched
     assert len(embedder.passage_calls) == calls + 1  # re-embedded once, as one batch
@@ -168,7 +169,7 @@ def test_title_change_re_embeds_with_the_new_title_in_the_text(open_app: OpenApp
         calls = len(embedder.passage_calls)
         resp = patch(client, doc_id, title="Platform roadmap")
         doc = get_doc(client, doc_id)
-        health = client.get("/healthz").json()
+        health = fresh_health(client)
     assert before == ["Old planning title", "Review process"]
     assert resp.json()["rechunked"] is True
     assert doc["title"] == "Platform roadmap"
@@ -214,7 +215,7 @@ def test_update_while_models_are_down_drops_stale_vectors_and_a_restart_repairs(
     assert nulls == 2 and not in_index  # no stale vectors of the replaced chunks
     fresh = FakeEmbedder()
     with open_app(fresh) as client:  # startup backfill
-        assert client.get("/healthz").json()["index_size"] == 2
+        assert fresh_health(client)["index_size"] == 2
         assert fresh.passages_embedded == 2
         assert search(client, "Object Lock compliance mode retention")["results"][0]["doc_id"] == doc_id
 

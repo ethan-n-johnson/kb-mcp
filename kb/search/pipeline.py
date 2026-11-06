@@ -1,6 +1,7 @@
 """Search pipeline: semantic path with rerank, keyword fallback, confidence, gaps.
 
-Semantic path (models healthy, toggle off), all under `KB_SEARCH_TIMEOUT`:
+Semantic path (models healthy, toggle off), all under `KB_SEARCH_TIMEOUT`
+(slot wait and computation together):
 embed the query, take the top `KB_RERANK_CANDIDATES` cosine matches (15), union
 the keyword top 5, rerank the union with the cross-encoder (each passage cut to
 `KB_RERANK_MAX_CHARS`, 1000 characters), keep at most 2 chunks per document and
@@ -11,11 +12,18 @@ so every search fell back to keyword. A timeout or any exception falls through t
 (SQLite: FTS5 + BM25; PostgreSQL: tsvector + `ts_rank_cd`). With `KB_RERANK=off` there is no union and no cross-encoder:
 candidates are ranked by cosine and judged against the cosine cutoffs.
 
-Model and database work runs in worker threads via `run_in_threadpool`. When
-the timeout cancels the awaiting task the thread cannot be interrupted: it
-finishes in the background (holding one pool slot) and its result is discarded,
-while the keyword fallback answers immediately. `tests/test_search.py` pins that
-the fallback does not wait for the slow model.
+Model and database work runs in worker threads via `run_in_threadpool`. A
+thread cannot be interrupted, so a timed-out search must not be allowed to pile
+up: at most `KB_SEMANTIC_CONCURRENCY` (2) semantic computations exist per
+process, enforced by a semaphore (`SearchState.semantic_slots`). A search that
+cannot get a slot within the timeout is answered by keyword search at once
+("semantic search busy; using keyword search"). The computation runs as a task
+that is never cancelled: when the timeout passes, the caller gets the keyword
+result, the task is told to stop at its next step (`_Abandoned`), and the slot
+is released by the task's done-callback only when the task, and so its worker
+thread, has really finished. So under overload CPU stays busy (scaling still
+triggers) while the backlog stays bounded and the keyword fallback never queues
+behind abandoned model work. `tests/test_search.py` pins both rules.
 
 Where the candidates come from depends on the store (`kb/search/candidates.py`):
 SQLite uses the in-memory numpy index and FTS5, PostgreSQL uses pgvector and
@@ -30,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, TypeVar
@@ -53,6 +62,10 @@ FTS_CANDIDATES = 5
 MAX_PER_DOC = 2
 
 T = TypeVar("T")
+
+
+class _Abandoned(Exception):
+    """Raised inside a semantic task whose caller has already moved on (timeout)."""
 
 
 @dataclass
@@ -174,11 +187,24 @@ def _retrieve(
     return out
 
 
-async def _semantic(state: SearchState, query: str, k: int, tags: list[str]) -> SearchResult:
-    """The whole semantic attempt; the caller wraps it in the timeout."""
+async def _semantic(
+    state: SearchState, query: str, k: int, tags: list[str], abandoned: threading.Event
+) -> SearchResult:
+    """The whole semantic attempt; the caller times it out (`_try_semantic`).
+
+    `abandoned` is set when the caller gave up: the attempt then stops before its
+    next step instead of spending CPU on a result nobody will read.
+    """
     assert state.embedder is not None
+
+    def check() -> None:
+        if abandoned.is_set():
+            raise _Abandoned
+
     qvec = await _in_thread(state.embedder.embed_query, query)
+    check()
     candidates = await _in_thread(_retrieve, state, query, qvec, tags)
+    check()
     settings = state.settings
     if state.rerank_enabled:
         assert state.reranker is not None
@@ -186,6 +212,7 @@ async def _semantic(state: SearchState, query: str, k: int, tags: list[str]) -> 
         limit = settings.rerank_max_chars
         texts = [passage_text(c.title, c.heading_path, c.text)[:limit] for c in candidates]
         scores = await _in_thread(reranker.score, query, texts) if candidates else []
+        check()
         for cand, score in zip(candidates, scores):
             cand.score = float(score)
         high, low = settings.conf_high, settings.conf_low
@@ -245,6 +272,68 @@ def _log_gap(state: SearchState, query: str, result: SearchResult) -> None:
         log.exception("could not record a search gap")
 
 
+# --- admission control ------------------------------------------------------------
+
+
+def _finish_semantic(slots: asyncio.Semaphore, task: "asyncio.Task[SearchResult]") -> None:
+    """Done-callback of a semantic task: free its slot and retrieve its exception.
+
+    Runs when the task has finished, which is after its last worker thread
+    returned, whether or not anyone is still waiting for the result.
+    """
+    slots.release()
+    if not task.cancelled():
+        task.exception()  # marks it retrieved; the waiting caller logs it if still there
+
+
+async def _try_semantic(
+    state: SearchState, query: str, k: int, tags: list[str]
+) -> SearchResult | None:
+    """The semantic result, or None when the caller should use keyword search.
+
+    The whole attempt (waiting for a slot, then the computation) gets
+    `KB_SEARCH_TIMEOUT`. The slot is released only by `_finish_semantic`.
+    """
+    timeout = state.settings.search_timeout
+    deadline = time.monotonic() + timeout
+    slots = state.semantic_slots()
+    try:
+        if slots.locked():
+            await asyncio.wait_for(slots.acquire(), timeout)
+        else:
+            await slots.acquire()
+    except asyncio.TimeoutError:
+        log.warning(
+            "semantic search busy; using keyword search",
+            extra={"timeout_s": timeout, "concurrency": state.settings.semantic_concurrency},
+        )
+        return None
+    abandoned = threading.Event()
+    try:
+        task = asyncio.ensure_future(_semantic(state, query, k, tags, abandoned))
+    except BaseException:
+        slots.release()
+        raise
+    task.add_done_callback(lambda t: _finish_semantic(slots, t))
+    try:
+        done, _ = await asyncio.wait({task}, timeout=max(0.0, deadline - time.monotonic()))
+    except BaseException:  # the request itself was cancelled: let the task wind down
+        abandoned.set()
+        raise
+    if not done:
+        abandoned.set()
+        log.warning(
+            "semantic search timed out; using keyword search",
+            extra={"timeout_s": timeout},
+        )
+        return None
+    try:
+        return task.result()
+    except Exception:
+        log.exception("semantic search failed; using keyword search")
+        return None
+
+
 # --- entry point ----------------------------------------------------------------
 
 
@@ -254,8 +343,8 @@ async def search(
     """Search the knowledge base; the response says which mode answered.
 
     `k` is clamped to 1..20. `tags` keeps only documents that carry all of
-    them. Semantic search is tried first when `state.semantic_ready()`; a
-    timeout (`KB_SEARCH_TIMEOUT`) or any error falls back to keyword search.
+    them. Semantic search is tried first when `state.semantic_ready()`; no free
+    slot within `KB_SEARCH_TIMEOUT`, a timeout or any error falls back to keyword search.
     Low-confidence results are recorded in `gaps`, and one metrics line is
     logged. The caller validates that `query` is not empty.
     """
@@ -264,17 +353,7 @@ async def search(
     wanted = list(dict.fromkeys(t.strip() for t in (tags or []) if t.strip()))
     result: SearchResult | None = None
     if state.semantic_ready():
-        try:
-            result = await asyncio.wait_for(
-                _semantic(state, query, k, wanted), state.settings.search_timeout
-            )
-        except asyncio.TimeoutError:
-            log.warning(
-                "semantic search timed out; using keyword search",
-                extra={"timeout_s": state.settings.search_timeout},
-            )
-        except Exception:
-            log.exception("semantic search failed; using keyword search")
+        result = await _try_semantic(state, query, k, wanted)
     if result is None:
         result = await _in_thread(_keyword, state, query, k, wanted)
     if result.confidence == "low":

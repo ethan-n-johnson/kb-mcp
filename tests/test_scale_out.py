@@ -203,8 +203,15 @@ class Clock:
 
 
 def _use_clock(client: Any, clock: Clock) -> None:
-    """Give an instance a test clock; its next toggle read happens on the first request."""
+    """Give an instance a test clock; its next toggle read happens on the first request.
+
+    The instance's health monitor is stopped, so the toggle is read inline on
+    that clock, the way a process without a monitor (stdio MCP, the CLI) reads
+    it. The monitor's own refresh is covered in `test_health.py`.
+    """
     state = client.app.state.search
+    client.app.state.health.stop()
+    state.monitored = False
     state.clock = clock
     state._toggle_read_at = None  # startup already read the toggle with the real clock
 

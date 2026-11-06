@@ -46,7 +46,7 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 - Embeddings are stored as float32, L2-normalized BLOBs in `chunks.embedding` (PostgreSQL: `vector(384)`, handed to and from the code as the same bytes), with `chunks.embed_model` set.
 - Every interface (REST, MCP over HTTP, MCP over stdio, UI, extension) calls `kb/service.py`. No business logic in `api.py`, `mcp_tools.py`, `ui.py` or templates.
 - Logs are one JSON object per line. Stdout in server mode; **stderr in stdio MCP mode** (stdout carries the protocol).
-- `GET /healthz` returns 200 whenever the database is readable, including in keyword mode. Model failure must never make the ALB kill the instance.
+- `GET /healthz` returns 200 whenever the database is readable, including in keyword mode. Model failure must never make the ALB kill the instance. In PostgreSQL mode it answers from a cache that `kb/health.py` (a daemon thread with its own connection) refreshes every 10 s (503 when the last success is over 60 s old); it never takes a pooled connection or a worker thread, and the same thread reads the fallback toggle, so no request path touches the pool for either.
 - The MCP tools (HTTP and stdio) need no token (PROGRESS.md deviation "MCP tools need no token"); REST, UI and extension writes still do.
 - Secrets never go in code, user data, Docker images or git. Write tokens come from `s3://<bucket>/config/write-tokens` on the instances (`KB_TOKENS_SOURCE=s3`, deviation 8), SSM `/kb/write-tokens` by default, or `KB_WRITE_TOKENS` locally.
 
@@ -74,6 +74,7 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 | `KB_COSINE_CONF_HIGH` / `KB_COSINE_CONF_LOW` | `0.75` / `0.55` | Confidence cutoffs used only when `KB_RERANK=off` |
 | `KB_DUP_THRESHOLD` | `0.96` | Near-duplicate cosine cutoff (tuned in phase 11: planted copy 0.9989, highest distinct pair 0.9300) |
 | `KB_SEARCH_TIMEOUT` | `5` | Seconds before a semantic search falls back to keyword (was 3; phase 11 measured over 3 s per search on the t3.medium) |
+| `KB_SEMANTIC_CONCURRENCY` | `2` | Semantic searches that may run at once per instance (admission control; a t3.medium has 2 vCPU). A search that cannot get a slot within `KB_SEARCH_TIMEOUT` is answered by keyword search (log line "semantic search busy; using keyword search"). The slot is freed only when the worker threads of the search have finished, even if the search timed out. Must be at least 1 |
 | `KB_RERANK_CANDIDATES` | `15` | Cosine matches handed to the cross-encoder (plus up to 5 FTS hits). The reranker's cost grows with this; without the reranker the cosine pool stays 30 |
 | `KB_RERANK_MAX_CHARS` | `1000` | Each passage is cut to this many characters for reranking only (embedding and results use the whole chunk). Must be at least 100 |
 | `KB_PUBLIC_URL` | unset | Address clients reach the server at, used in upload links (`kb/uploads.py`). The app stack sets `https://<CloudFront domain>`; unset means the request's own base URL (fine locally) |

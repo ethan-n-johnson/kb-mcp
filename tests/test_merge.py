@@ -9,7 +9,7 @@ from kb import service
 from tests.conftest import AUTH, OpenApp, Svc
 from tests.corpus import EBS, ELB, S3, VPC
 from tests.fakes import FakeEmbedder
-from tests.helpers import client_searchable_doc_ids, load_corpus, search, upload
+from tests.helpers import client_searchable_doc_ids, fresh_health, load_corpus, search, upload
 from tests.ops_helpers import add_gap, audit_rows, get_doc, rows, scalar
 
 pytestmark = pytest.mark.dual
@@ -76,7 +76,7 @@ def test_search_hits_the_target_for_the_sources_content(open_app: OpenApp) -> No
         before = search(client, "Which S3 feature moves old objects to Glacier automatically?")
         merge(client, ids["vpc"], [ids["s3"], ids["elb"]])
         after = search(client, "Which S3 feature moves old objects to Glacier automatically?")
-        health = client.get("/healthz").json()
+        health = fresh_health(client)
         index_docs = client_searchable_doc_ids(client)
         total_chunks = scalar(client, "SELECT count(*) FROM chunks")
     assert before["results"][0]["doc_id"] == ids["s3"]
@@ -267,7 +267,7 @@ def test_merging_while_models_are_down_stores_null_vectors_and_drops_the_index(
     assert indexed == {ids["elb"]}
     fresh = FakeEmbedder()
     with open_app(fresh) as client:  # a restart backfills the merged doc
-        assert client.get("/healthz").json()["index_size"] == chunks
+        assert fresh_health(client)["index_size"] == chunks
 
 
 def test_many_sources_and_markdown_with_code_fences(open_app: OpenApp) -> None:

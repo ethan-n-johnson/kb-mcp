@@ -10,6 +10,7 @@ only with SQLite; in PostgreSQL mode the vectors stay in the database
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -69,11 +70,19 @@ class SearchState:
 
     The keyword-fallback toggle (`fallback_toggle`) is process memory in SQLite
     mode. In PostgreSQL mode it is the `fallback` row of the `settings` table,
-    shared by every instance: reading the property looks at the table at most
-    every `TOGGLE_CACHE_SECONDS` (by `clock`), and writing it sets the local
-    value at once (`service.set_fallback` writes the row). A failed read keeps
-    the last known value and never raises, so `/healthz` and search do not
-    depend on it.
+    shared by every instance, and writing the property sets the local value at
+    once (`service.set_fallback` writes the row). Reading it never waits on the
+    database when the process runs a `kb.health.HealthMonitor` (`monitored`,
+    the server): the monitor thread reads the row every `TOGGLE_CACHE_SECONDS`
+    on its own connection and hands the value over (`apply_toggle`), because a
+    read on the event loop would wait for a pooled connection and stall every
+    request, `/healthz` included. A process without a monitor (stdio MCP, the
+    CLI, tests) reads the row itself, at most every `TOGGLE_CACHE_SECONDS` (by
+    `clock`). A failed read keeps the last known value and never raises, so
+    `/healthz` and search do not depend on it.
+
+    `semantic_slots()` is the admission control for the semantic path: at most
+    `KB_SEMANTIC_CONCURRENCY` semantic computations run at once per process.
     """
 
     TOGGLE_CACHE_SECONDS = 5.0
@@ -83,14 +92,17 @@ class SearchState:
     reranker: RerankerLike | None = None
     index: VectorIndex = field(default_factory=VectorIndex)
     clock: Callable[[], float] = time.monotonic
+    monitored: bool = field(default=False, init=False, repr=False)
     _toggle: bool = field(default=False, init=False, repr=False)
     _toggle_read_at: float | None = field(default=None, init=False, repr=False)
     _toggle_error_logged: bool = field(default=False, init=False, repr=False)
+    _slots: asyncio.Semaphore | None = field(default=None, init=False, repr=False)
+    _slots_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
 
     @property
     def fallback_toggle(self) -> bool:
         """True while searches are forced to keyword mode (see the class docstring)."""
-        if self.settings.dialect == "postgres":
+        if self.settings.dialect == "postgres" and not self.monitored:
             now = self.clock()
             read_at = self._toggle_read_at
             if read_at is None or now - read_at >= self.TOGGLE_CACHE_SECONDS:
@@ -114,15 +126,35 @@ class SearchState:
             finally:
                 store.close()
         except Exception as exc:
-            if not self._toggle_error_logged:
-                log.warning(
-                    "cannot read the fallback toggle; keeping the last value",
-                    extra={"error": type(exc).__name__},
-                )
-                self._toggle_error_logged = True
+            self.toggle_read_failed(exc)
             return
+        self.apply_toggle(value)
+
+    def apply_toggle(self, value: str | None) -> None:
+        """Take the `fallback` row's value (None: no row, so off) as read from the database."""
         self._toggle_error_logged = False
         self._toggle = value == "on"
+
+    def toggle_read_failed(self, exc: Exception) -> None:
+        """Keep the last known toggle after a failed read; log the first failure of a run."""
+        if not self._toggle_error_logged:
+            log.warning(
+                "cannot read the fallback toggle; keeping the last value",
+                extra={"error": type(exc).__name__},
+            )
+            self._toggle_error_logged = True
+
+    def semantic_slots(self) -> asyncio.Semaphore:
+        """The semaphore that bounds concurrent semantic computations (call on the event loop).
+
+        Created on first use inside the running loop, so it belongs to that
+        loop; a different loop (tests run several) gets a fresh one.
+        """
+        loop = asyncio.get_running_loop()
+        if self._slots is None or self._slots_loop is not loop:
+            self._slots = asyncio.Semaphore(self.settings.semantic_concurrency)
+            self._slots_loop = loop
+        return self._slots
 
     @property
     def db_path(self) -> str:

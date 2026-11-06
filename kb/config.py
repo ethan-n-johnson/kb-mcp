@@ -40,6 +40,7 @@ class Settings:
     cosine_conf_low: float = 0.55
     dup_threshold: float = 0.96
     search_timeout: float = 5.0
+    semantic_concurrency: int = 2
     rerank_candidates: int = 15
     rerank_max_chars: int = 1000
     public_url: str | None = None
@@ -82,6 +83,12 @@ class Settings:
         rerank_max_chars = _int(e, "KB_RERANK_MAX_CHARS", cls.rerank_max_chars)
         if rerank_candidates < 1 or rerank_max_chars < 100:
             raise ValueError("KB_RERANK_CANDIDATES must be at least 1 and KB_RERANK_MAX_CHARS at least 100")
+        try:
+            semantic_concurrency = _int(e, "KB_SEMANTIC_CONCURRENCY", cls.semantic_concurrency)
+        except ValueError:
+            semantic_concurrency = 0
+        if semantic_concurrency < 1:
+            raise ValueError("KB_SEMANTIC_CONCURRENCY must be an integer of at least 1")
         tokens_source = (e.get("KB_TOKENS_SOURCE") or cls.tokens_source).strip().lower()
         if tokens_source not in ("ssm", "s3"):
             raise ValueError("KB_TOKENS_SOURCE must be ssm or s3")
@@ -114,6 +121,7 @@ class Settings:
             cosine_conf_low=_float(e, "KB_COSINE_CONF_LOW", cls.cosine_conf_low),
             dup_threshold=_float(e, "KB_DUP_THRESHOLD", cls.dup_threshold),
             search_timeout=_float(e, "KB_SEARCH_TIMEOUT", cls.search_timeout),
+            semantic_concurrency=semantic_concurrency,
             rerank_candidates=rerank_candidates,
             rerank_max_chars=rerank_max_chars,
             public_url=(e.get("KB_PUBLIC_URL") or "").strip().rstrip("/") or None,

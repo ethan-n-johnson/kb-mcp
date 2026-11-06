@@ -18,6 +18,9 @@ Behavior switches for tests: `delay` (seconds to sleep inside each model call,
 for the timeout test), `fail` (raise `RuntimeError` from each call, for the
 error-fallback test), `healthy` (settable), and call recorders
 (`passage_calls`, `query_calls`, `score_calls`) for spying on embed counts.
+`FakeEmbedder.gate` (a `threading.Event`) makes `embed_query` block until the
+event is set, and `active` / `max_active` count the `embed_query` calls running
+at the same moment (admission control tests).
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import threading
 import time
 from typing import Sequence
 
@@ -82,6 +86,10 @@ class FakeEmbedder(_FakeModel):
         self.healthy = healthy
         self.passage_calls: list[list[str]] = []
         self.query_calls: list[str] = []
+        self.gate: threading.Event | None = None
+        self.active = 0
+        self.max_active = 0
+        self._count_lock = threading.Lock()
 
     def embed(self, texts: Sequence[str]) -> np.ndarray:
         """Embed `texts` into an array of shape (len(texts), 384), float32, unit norm.
@@ -109,8 +117,17 @@ class FakeEmbedder(_FakeModel):
     def embed_query(self, query: str) -> np.ndarray:
         """Embed one query; shape (384,). Records the call in `query_calls`."""
         self.query_calls.append(query)
-        self._enter()
-        return self.embed([query])[0]
+        with self._count_lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            if self.gate is not None:
+                self.gate.wait(30)
+            self._enter()
+            return self.embed([query])[0]
+        finally:
+            with self._count_lock:
+                self.active -= 1
 
     @property
     def passages_embedded(self) -> int:
