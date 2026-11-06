@@ -33,6 +33,7 @@ dev = [
   "pytest",
   "moto[s3,ssm]",
   "cfn-lint",
+  "locust",
 ]
 
 [tool.setuptools.packages.find]

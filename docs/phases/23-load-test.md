@@ -1,6 +1,6 @@
 # Phase 23: Load test and scaling evidence
 
-**Days:** Sat Nov 7 to Sun Nov 8 · **Depends on:** 22 · **Where:** laptop + AWS · **PLAN.md sections:** Course alignment (Elasticity, Performance efficiency)
+**Days:** Tue Nov 10 · **Depends on:** 22 · **Where:** laptop + AWS · **PLAN.md sections:** Course alignment (Elasticity, Performance efficiency)
 
 ## Goal
 

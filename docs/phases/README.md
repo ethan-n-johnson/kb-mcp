@@ -59,16 +59,16 @@ Phase 1 (00 to 16, plus the upload links) is the working single-instance prototy
 
 | # | Phase | Days | Where | Depends on | HUMAN steps | Cut line |
 | --- | --- | --- | --- | --- | --- | --- |
-| 19 | [RDS probe and kb-db stack](19-rds-stack.md) | Thu Oct 29 to Fri Oct 30 | AWS, then local | 12 | run `infra/probe-rds.sh` | |
-| 20 | [PostgreSQL storage backend](20-postgres-storage.md) | Sat Oct 31 to Mon Nov 2 | local (Docker), then AWS | 19 | | |
-| 21 | [Search on pgvector and tsvector](21-pgvector-search.md) | Tue Nov 3 to Wed Nov 4 | local, then AWS | 20 | | |
-| 22 | [Stateless app and scale-out](22-stateless-scale-out.md) | Thu Nov 5 to Fri Nov 6 | local, then AWS | 21 | screenshots | |
-| 23 | [Load test and scaling evidence](23-load-test.md) | Sat Nov 7 to Sun Nov 8 | laptop + AWS | 22 | run Locust, screenshots | 3rd: a short curl loop instead of Locust |
-| 24 | [Final README, extension, submission](24-final-wrap.md) | Mon Nov 9 to Wed Nov 11 | local + AWS | 23 | extension, rehearsal, video | 1st: extension; 2nd: full DEMO.md |
+| 19 | [RDS probe and kb-db stack](19-rds-stack.md) | done Oct 29 | AWS, then local | 12 | run `infra/probe-rds.sh` | |
+| 20 | [PostgreSQL storage backend](20-postgres-storage.md) | done Oct 29 | local (Docker), then AWS | 19 | | |
+| 21 | [Search on pgvector and tsvector](21-pgvector-search.md) | Fri Nov 6 to Sat Nov 7 | local, then AWS | 20 | | |
+| 22 | [Stateless app and scale-out](22-stateless-scale-out.md) | Sun Nov 8 to Mon Nov 9 | local, then AWS | 21 | screenshots | |
+| 23 | [Load test and scaling evidence](23-load-test.md) | Tue Nov 10 | laptop + AWS | 22 | run Locust, screenshots | 2nd: a short curl loop instead of Locust |
+| 24 | [Final README, extension, submission](24-final-wrap.md) | Wed Nov 11 to Thu Nov 12 | local + AWS | 23 | extension, rehearsal, video | 1st: extension; 3rd: full DEMO.md |
 
-Thu Nov 12 is buffer. Phase 18 (the Lambda) is dropped: EventBridge is not on the sandbox list.
+Replanned Nov 6: 19 and 20 finished early (Oct 29), then a week passed, so there is no buffer day left. Submit Fri Nov 13. Phase 18 (the Lambda) is dropped: EventBridge is not on the sandbox list.
 
-**If phase 20 runs late** (it is the biggest), keep the order and cut from the end: 23 shrinks to a 10-minute curl loop with one scale-out screenshot, then the extension goes. Never cut: RDS behind the app, the eval gate in 21, and two healthy instances in phase 22.
+**If anything runs late**, keep the order and cut from the end: 23 shrinks to a 10-minute curl loop with one scale-out screenshot, then the extension goes. Never cut: RDS behind the app, the eval gate in 21, and two healthy instances in phase 22.
 
 **If RDS is denied outright** in phase 19, stop and decide with the user. The fallback is DynamoDB for docs and tags plus the existing in-memory index per instance, which is a different phase 20.
 
