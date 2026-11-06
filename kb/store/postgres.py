@@ -284,47 +284,71 @@ class PostgresStore:
             self._pool.putconn(conn)
 
 
-# --- keyword search -------------------------------------------------------------
-# A plain port so keyword mode and the semantic path's FTS union keep working on
-# PostgreSQL. Phase 21 moves candidate retrieval behind kb/search/candidates.py
-# and tunes it; nothing here is final.
-
-
-def _tsquery(terms: list[str], op: str) -> str:
-    """SQL building one tsquery from the terms: `plainto_tsquery` each, joined by `||` or `&&`."""
-    return f" {op} ".join("plainto_tsquery('english', ?)" for _ in terms)
+# --- keyword search and vector search -------------------------------------------
+# The candidate sources for PostgreSQL mode; `kb/search/candidates.py` is the one
+# interface the search code calls.
 
 
 def fts_rows(
     store: PostgresStore, terms: list[str], tags: list[str], limit: int, with_snippet: bool
 ) -> list[Any]:
-    """Top keyword matches by `ts_rank_cd` (higher is better); see `Store.fts_rows`."""
+    """Top keyword matches by `ts_rank_cd` (higher is better); see `Store.fts_rows`.
+
+    The terms are `\\w+` tokens, so joining them with ` or ` gives a
+    `websearch_to_tsquery` OR expression with no other operator in it.
+    """
     if not terms:
         return []
     tag_sql, tag_params = tag_filter_sql(tags) if tags else ("", [])
-    query = _tsquery(terms, "||")
     snippet = (
-        f"ts_headline('english', c.text, {query},"
+        "ts_headline('english', c.text, q.query,"
         " 'StartSel=<b>, StopSel=</b>, MaxWords=24, MinWords=10')"
         if with_snippet
         else "''"
     )
-    snippet_params = list(terms) if with_snippet else []
     return store.fetchall(
         "SELECT c.id AS chunk_id, c.doc_id, c.heading_path, c.text, d.title, d.source_url,"
         f" d.verified_at, ts_rank_cd(c.tsv, q.query) AS score, {snippet} AS snip"
-        f" FROM chunks c JOIN docs d ON d.id = c.doc_id, (SELECT {query} AS query) q"
+        " FROM chunks c JOIN docs d ON d.id = c.doc_id,"
+        " (SELECT websearch_to_tsquery('english', ?) AS query) q"
         f" WHERE c.tsv @@ q.query{tag_sql} ORDER BY score DESC, c.id LIMIT ?",
-        [*snippet_params, *terms, *tag_params, limit],
+        [" or ".join(terms), *tag_params, limit],
     )
 
 
 def fts_covers(store: PostgresStore, terms: list[str], chunk_id: int) -> bool:
-    """True if the chunk's `tsv` matches the AND of all `terms`."""
+    """True if the chunk's `tsv` matches the AND of all `terms` (`plainto_tsquery`)."""
     if not terms:
         return False
     row = store.fetchone(
-        f"SELECT 1 FROM chunks WHERE id = ? AND tsv @@ ({_tsquery(terms, '&&')})",
-        [chunk_id, *terms],
+        "SELECT 1 FROM chunks WHERE id = ? AND tsv @@ plainto_tsquery('english', ?)",
+        [chunk_id, " ".join(terms)],
     )
     return row is not None
+
+
+def vector_rows(
+    store: PostgresStore, qvec: bytes, k: int, tags: list[str], embed_model: str
+) -> list[Any]:
+    """The `k` chunks closest to `qvec` by cosine, best first: `chunk_id`, `doc_id`, `cos`.
+
+    Only chunks embedded by `embed_model` count (the same set the in-memory index
+    holds on SQLite). `qvec` is the L2-normalized float32 query vector as bytes.
+    `<=>` is cosine distance, so `1 - distance` is the cosine similarity.
+    """
+    tag_sql, tag_params = tag_filter_sql(tags) if tags else ("", [])
+    return store.fetchall(
+        "SELECT c.id AS chunk_id, c.doc_id, 1 - (c.embedding <=> ?) AS cos FROM chunks c"
+        f" WHERE c.embedding IS NOT NULL AND c.embed_model = ?{tag_sql}"
+        " ORDER BY c.embedding <=> ?, c.id LIMIT ?",
+        [qvec, embed_model, *tag_params, qvec, k],
+    )
+
+
+def doc_vector_rows(store: PostgresStore, embed_model: str) -> list[Any]:
+    """`doc_id` and the mean of the doc's chunk vectors (float32 bytes, not normalized), by doc id."""
+    return store.fetchall(
+        "SELECT doc_id, avg(embedding) AS v FROM chunks"
+        " WHERE embedding IS NOT NULL AND embed_model = ? GROUP BY doc_id ORDER BY doc_id",
+        [embed_model],
+    )

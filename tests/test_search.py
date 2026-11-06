@@ -17,12 +17,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kb.config import Settings
-from kb.search import pipeline
+from kb.search import candidates, indexing, pipeline
 from kb.search.embedder import passage_text
 from tests.conftest import AUTH, OpenApp
 from tests.corpus import DOCS, QUERIES
-from tests.helpers import db_conn, gap_rows, load_corpus, search, upload
+from tests.helpers import client_searchable_doc_ids, db_conn, gap_rows, load_corpus, search, upload
 from tests.fakes import FakeEmbedder, FakeReranker
+
+pytestmark = pytest.mark.dual
 
 
 class ConstReranker(FakeReranker):
@@ -73,13 +75,13 @@ def test_response_carries_doc_metadata(open_app: OpenApp) -> None:
         top = search(client, QUERIES["ebs_linux"][0])["results"][0]
     assert top["title"] == "Amazon EBS volumes"
     assert top["source_url"] == "https://docs.example.com/ebs"
-    assert top["verified_at"] == "2026-10-10"
+    assert top["verified_at"].startswith("2026-10-10")  # PostgreSQL stores a timestamp
     assert len(top["snippet"]) <= 240 and "<b>" not in top["snippet"]
     assert "To attach an EBS volume to a Linux instance" in top["snippet"]
 
 
 def test_k_limits_results_and_is_capped_at_20(open_app: OpenApp) -> None:
-    with open_app() as client:
+    with open_app(KB_RERANK_CANDIDATES="25") as client:  # a pool wide enough for 25 documents
         for n in range(25):
             upload(client, f"# Zebra note {n}\n\n" + "zebra stripes herd savanna " * 15 + f"unique{n}")
         assert len(search(client, "zebra", k=3)["results"]) == 3
@@ -472,15 +474,20 @@ def test_delete_removes_the_doc_from_the_index_and_results(open_app: OpenApp) ->
         body = search(client, q)
         after = client.get("/healthz").json()["index_size"]
         keyword = search(client, "glacier lifecycle", **{})
+        assert ids["s3"] not in client_searchable_doc_ids(client)
     assert all(r["doc_id"] != ids["s3"] for r in body["results"] + keyword["results"])
     assert before - after == 3
-    index = client.app.state.search.index
-    assert ids["s3"] not in index.doc_ids()
 
 
 def test_hooks_log_instead_of_raising(
-    open_app: OpenApp, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    open_app: OpenApp, backend: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """A failing index hook is logged, never raised.
+
+    SQLite has an in-memory index with two hooks (replace on write, remove on
+    delete). PostgreSQL has no index, so only the publish step exists to fail,
+    and the delete hook is a no-op.
+    """
     with open_app() as client:
         state = client.app.state.search
 
@@ -489,14 +496,18 @@ def test_hooks_log_instead_of_raising(
 
         md, tags = DOCS["vpc"]
         doc_id = upload(client, md, tags)
-        monkeypatch.setattr(state.index, "remove_doc", boom)
-        monkeypatch.setattr(state.index, "replace_doc", boom)
+        if backend == "sqlite":
+            monkeypatch.setattr(state.index, "remove_doc", boom)
+            monkeypatch.setattr(state.index, "replace_doc", boom)
+        else:
+            monkeypatch.setattr(indexing, "publish_doc", boom)
         with caplog.at_level(logging.ERROR):
             assert client.delete(f"/api/docs/{doc_id}", headers=AUTH).status_code == 200
             md2, _ = DOCS["elb"]
             assert client.post("/api/docs", json={"content": md2}, headers=AUTH).status_code == 201
     messages = [r.getMessage() for r in caplog.records]
-    assert any("removing vectors after delete failed" in m for m in messages)
+    if backend == "sqlite":
+        assert any("removing vectors after delete failed" in m for m in messages)
     assert any("publishing vectors to the index failed" in m for m in messages)
 
 
@@ -724,14 +735,13 @@ def test_reranked_passages_are_cut_to_kb_rerank_max_chars(open_app: OpenApp) -> 
 def test_without_the_reranker_the_cosine_pool_stays_30(open_app: OpenApp, monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[int] = []
     with open_app(KB_RERANK="off", KB_RERANK_CANDIDATES="2") as client:
-        index = client.app.state.search.index
-        original = index.top_k
+        original = candidates.vector_candidates
 
-        def spy(qvec, k, allowed=None):  # type: ignore[no-untyped-def]
+        def spy(conn, state, qvec, k, tags):  # type: ignore[no-untyped-def]
             seen.append(k)
-            return original(qvec, k, allowed)
+            return original(conn, state, qvec, k, tags)
 
-        monkeypatch.setattr(index, "top_k", spy)
+        monkeypatch.setattr(candidates, "vector_candidates", spy)
         load_corpus(client)
         search(client, QUERIES["nat"][0])
     assert seen == [pipeline.SEMANTIC_CANDIDATES]

@@ -12,7 +12,15 @@ from kb.search.embedder import passage_text
 from tests.conftest import AUTH, OpenApp, Svc
 from tests.corpus import EBS, S3
 from tests.fakes import FakeEmbedder
-from tests.helpers import db_conn, fts_count, load_corpus, reopen, search, upload
+from tests.helpers import (
+    client_searchable_doc_ids,
+    db_conn,
+    fts_count,
+    load_corpus,
+    reopen,
+    search,
+    upload,
+)
 from tests.ops_helpers import ProbeEmbedder, audit_rows, backdate, get_doc, rows, scalar
 
 pytestmark = pytest.mark.dual
@@ -199,11 +207,10 @@ def test_update_while_models_are_down_drops_stale_vectors_and_a_restart_repairs(
     embedder = FakeEmbedder()
     with open_app(embedder) as client:
         doc_id = upload(client, S3)
-        state = client.app.state.search
         embedder.healthy = False
         assert patch(client, doc_id, content=NEW_S3).status_code == 200
         nulls = scalar(client, "SELECT count(*) FROM chunks WHERE embedding IS NULL")
-        in_index = doc_id in state.index.doc_ids()
+        in_index = doc_id in client_searchable_doc_ids(client)
     assert nulls == 2 and not in_index  # no stale vectors of the replaced chunks
     fresh = FakeEmbedder()
     with open_app(fresh) as client:  # startup backfill

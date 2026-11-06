@@ -40,10 +40,10 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from kb import db, portable, service
+from kb import service
 from kb.config import Settings
 from kb.schemas import UploadRequest
-from kb.search import dupes, indexing, pipeline
+from kb.search import candidates, dupes, indexing, pipeline
 from kb.search.state import EmbedderLike, RerankerLike, SearchState
 from kb.store import Store, open_store
 
@@ -258,7 +258,7 @@ def _dup_report(conn: Store, state: SearchState, planted: Path, original_url: st
     vectors = indexing.embed_chunks(state, prepared.title, prepared.chunks)
     if vectors is None:
         raise RuntimeError("the embedder is not available; the near-duplicate check needs the models")
-    doc_ids, matrix = state.index.doc_vectors()
+    doc_ids, matrix = candidates.doc_vectors(conn, state)
     urls = {
         int(r["id"]): r["source_url"] for r in conn.execute("SELECT id, source_url FROM docs")
     }
@@ -316,44 +316,60 @@ async def _run(state: SearchState, questions: list[Question]) -> list[QuestionRe
     return results
 
 
+def _delete_gaps_after(settings: Settings, last_id: int) -> None:
+    """Remove the `gaps` rows the evaluation's searches added (ids above `last_id`)."""
+    store = open_store(settings)
+    try:
+        store.execute("DELETE FROM gaps WHERE id > ?", (last_id,))
+    finally:
+        store.close()
+
+
 @contextmanager
 def _temp_state(
     settings: Settings, embedder: EmbedderLike | None, reranker: RerankerLike | None
-) -> Iterator[tuple[SearchState, Path]]:
-    """A started `SearchState` over a temporary copy of the database.
+) -> Iterator[SearchState]:
+    """A started `SearchState` the evaluation can search without changing the data.
 
-    The copy is a SQLite file: a copy of `settings.db_path`, or, in PostgreSQL
-    mode, an export of the database (`kb.portable`), so a question that logs a
-    gap never writes into the real one. (Phase 21 evaluates PostgreSQL's own
-    search.) Raises `RuntimeError` when the database is missing or the models
-    cannot load: tuning in keyword mode would measure the wrong thing.
+    SQLite: the state runs over a temporary copy of `settings.db_path`, so a question that logs a gap never writes into the real
+    file. PostgreSQL: the state searches the database itself, so the evaluation
+    measures pgvector and `tsvector` and not a SQLite export; the `gaps` rows its
+    searches add are deleted again on the way out. Raises
+    `RuntimeError` when the database is missing or the models cannot load: tuning
+    in keyword mode would measure the wrong thing.
     """
+    overrides = {"search_timeout": EVAL_TIMEOUT, "bucket": None, "models_on": True}
+    if settings.database_url:
+        store = open_store(settings)
+        try:
+            row = store.execute("SELECT coalesce(max(id), 0) FROM gaps").fetchone()
+            last_gap = int(row[0])
+        finally:
+            store.close()
+        local = dataclasses.replace(settings, **overrides)  # type: ignore[arg-type]
+        try:
+            state = indexing.build_state(local, embedder, reranker)
+            asyncio.run(indexing.start(state))
+            if not state.semantic_ready():
+                raise RuntimeError(
+                    "the models did not load, so search is keyword only; check KB_MODEL_DIR"
+                )
+            yield state
+        finally:
+            _delete_gaps_after(local, last_gap)
+        return
     with tempfile.TemporaryDirectory(prefix="kb-eval-") as tmp:
         copy = Path(tmp) / "kb.db"
-        if settings.database_url:
-            store = open_store(settings)
-            try:
-                portable.export_sqlite(store, copy)
-            finally:
-                store.close()
-        else:
-            source = Path(settings.db_path)
-            if not source.is_file():
-                raise RuntimeError(f"database {source} does not exist; run the seed first")
-            _copy_database(source, copy)
-        local = dataclasses.replace(
-            settings,
-            db_path=str(copy),
-            database_url=None,
-            search_timeout=EVAL_TIMEOUT,
-            bucket=None,
-            models_on=True,
-        )
+        source = Path(settings.db_path)
+        if not source.is_file():
+            raise RuntimeError(f"database {source} does not exist; run the seed first")
+        _copy_database(source, copy)
+        local = dataclasses.replace(settings, db_path=str(copy), **overrides)  # type: ignore[arg-type]
         state = indexing.build_state(local, embedder, reranker)
         asyncio.run(indexing.start(state))
         if not state.semantic_ready():
             raise RuntimeError("the models did not load, so search is keyword only; check KB_MODEL_DIR")
-        yield state, copy
+        yield state
 
 
 def evaluate(
@@ -365,15 +381,15 @@ def evaluate(
     embedder: EmbedderLike | None = None,
     reranker: RerankerLike | None = None,
 ) -> EvalReport:
-    """Evaluate `questions` against a temporary copy of `settings.db_path`.
+    """Evaluate `questions` without writing to the database (see `_temp_state`).
 
     `embedder` and `reranker` replace the real models (tests).
     """
-    with _temp_state(settings, embedder, reranker) as (state, copy):
+    with _temp_state(settings, embedder, reranker) as state:
         report = EvalReport(settings=settings)
         report.results = asyncio.run(_run(state, questions))
         if planted is not None and planted_original is not None:
-            conn = db.connect(copy)
+            conn = open_store(state.settings)
             try:
                 report.dup = _dup_report(conn, state, planted, planted_original)
             finally:
@@ -395,7 +411,7 @@ def inspect(
     snippet. Like `evaluate`, nothing reaches the real database (no gaps).
     """
     lines: list[str] = []
-    with _temp_state(settings, embedder, reranker) as (state, _copy):
+    with _temp_state(settings, embedder, reranker) as state:
         for query in queries:
             found = asyncio.run(pipeline.search(state, query, k))
             lines.append(f"{query}  [{found.mode}, {found.confidence}]")

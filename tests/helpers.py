@@ -35,6 +35,39 @@ def db_conn(client: TestClient) -> Store:
     return open_store(client.app.state.settings)
 
 
+def searchable_doc_ids(state: Any, conn: Store) -> set[int]:
+    """Ids of the documents the semantic search can reach.
+
+    SQLite: the documents in the in-memory index. PostgreSQL has no index (the
+    vectors are searched in the database), so: the documents with a stored
+    vector from the current model.
+    """
+    if state.settings.dialect == "sqlite":
+        return set(state.index.doc_ids())
+    rows = conn.execute(
+        "SELECT DISTINCT doc_id FROM chunks WHERE embedding IS NOT NULL AND embed_model = ?",
+        (state.embedder.model_name,),
+    ).fetchall()
+    return {int(r[0]) for r in rows}
+
+
+def client_searchable_doc_ids(client: TestClient) -> set[int]:
+    """`searchable_doc_ids` for the app behind `client`."""
+    conn = db_conn(client)
+    try:
+        return searchable_doc_ids(client.app.state.search, conn)
+    finally:
+        conn.close()
+
+
+def searchable_chunk_count(state: Any, conn: Store) -> int:
+    """Number of vectors the semantic search can reach (see `searchable_doc_ids`)."""
+    if state.settings.dialect == "sqlite":
+        return len(state.index)
+    row = conn.execute("SELECT count(*) FROM chunks WHERE embedding IS NOT NULL").fetchone()
+    return int(row[0])
+
+
 def reopen(db_path: object) -> Store:
     """A second connection to the database of the current backend (`backend` fixture).
 

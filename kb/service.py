@@ -142,6 +142,8 @@ def _after_doc_deleted(doc_id: int, search_state: SearchState | None = None) -> 
     """
     if search_state is None:
         return
+    if search_state.vectors_in_db:  # PostgreSQL: the vectors went with the rows
+        return
     try:
         search_state.index.remove_doc(doc_id)
     except Exception:
