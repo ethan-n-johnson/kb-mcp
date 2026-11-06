@@ -47,7 +47,7 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "dual: run every test on SQLite and on PostgreSQL")
 
 
-_TABLES = "gaps, audit_log, doc_tags, chunks, docs"
+_TABLES = "gaps, audit_log, doc_tags, chunks, docs, upload_tickets, settings"
 
 
 def _empty_postgres(url: str) -> None:

@@ -323,7 +323,7 @@ def build_mcp(source: SearchStateSource, *, stdio: bool = False) -> MCPServer:
                 assert request is not None
                 base = str(request.base_url).rstrip("/")
             return service.create_upload_link(
-                actor, filename, base, title=title, tags=tags, force=force
+                conn, actor, filename, base, title=title, tags=tags, force=force
             ).model_dump()
 
         return await call_write(ctx, run_link)
