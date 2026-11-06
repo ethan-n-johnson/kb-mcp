@@ -54,11 +54,17 @@ class CachedStaticFiles(StaticFiles):
         return response
 
 
-def _count_chunks(settings: Settings) -> int:
-    """Chunk count on a short-lived connection (PostgreSQL mode; runs in a worker thread)."""
+def _count_chunks(settings: Settings) -> tuple[int, int]:
+    """Chunk count and embedded chunk count on a short-lived connection.
+
+    PostgreSQL mode; runs in a worker thread. One round trip for both numbers.
+    """
     conn = open_store(settings)
     try:
-        return int(conn.execute("SELECT count(*) FROM chunks").fetchone()[0])
+        row = conn.execute(
+            "SELECT count(*), count(embedding) FROM chunks"
+        ).fetchone()
+        return int(row[0]), int(row[1])
     finally:
         conn.close()
 
@@ -170,8 +176,11 @@ def create_app(
             shared = request.app.state.conn
             if shared is not None:
                 count = shared.execute("SELECT count(*) FROM chunks").fetchone()[0]
+                indexed = len(state.index)
             else:
-                count = await run_in_threadpool(_count_chunks, request.app.state.settings)
+                # PostgreSQL: vectors live in the database, so the "index" is the
+                # chunks that have an embedding.
+                count, indexed = await run_in_threadpool(_count_chunks, request.app.state.settings)
         except Exception:
             log.exception("health check failed")
             return JSONResponse({"status": "error"}, status_code=503)
@@ -182,7 +191,7 @@ def create_app(
                 "models": state.model_status(),
                 "fallback_toggle": state.fallback_toggle,
                 "chunks": count,
-                "index_size": len(state.index),
+                "index_size": indexed,
             }
         )
 

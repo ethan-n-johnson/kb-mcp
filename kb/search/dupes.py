@@ -6,6 +6,7 @@ from __future__ import annotations
 import numpy as np
 
 from kb.schemas import DuplicateCandidate
+from kb.search import candidates
 from kb.search.embedder import normalize_rows
 from kb.search.state import SearchState
 from kb.store import Store
@@ -25,12 +26,12 @@ def find_near_duplicates(
     """Existing docs whose vector is close to the new document's, best first.
 
     The new document's vector is the normalized mean of `chunk_vectors`; each
-    stored doc's is the same mean over its indexed chunks (`doc_vectors`, one
+    stored doc's is the same mean over its embedded chunks (`doc_vectors`, one
     matrix for all docs). A doc is a candidate when the cosine is at least
     `settings.dup_threshold`; at most 3 are returned. Docs without vectors in
     the index cannot be compared and are not reported.
     """
-    doc_ids, matrix = state.index.doc_vectors()
+    doc_ids, matrix = candidates.doc_vectors(conn, state)
     if doc_ids.shape[0] == 0:
         return []
     sims = matrix @ doc_vector(chunk_vectors)

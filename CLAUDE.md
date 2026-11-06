@@ -38,7 +38,7 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 
 ## Runtime rules (never break these)
 
-- uvicorn runs with exactly **1 worker**; the Auto Scaling group stays at **max 1**. The vector index lives in process memory.
+- uvicorn runs with exactly **1 worker**; the Auto Scaling group stays at **max 1**. In SQLite mode the vector index lives in process memory; in PostgreSQL mode cosine search runs in the database (pgvector, phase 21) and the in-memory index stays empty.
 - Two storage backends behind `kb/store/`: SQLite (default) and PostgreSQL with pgvector (when `KB_DATABASE_URL` is set, or read from S3 with `KB_DATABASE_URL_SOURCE=s3`). Code outside `kb/store/` and the schema modules (`kb/db.py`, `kb/store/schema_pg.sql`) writes SQL once with `?` placeholders and gets the dialect from the store; dialect-specific SQL (schema, full-text search, vectors) stays in the dialect modules. In PostgreSQL mode there is no snapshot thread and no commit hook; the S3 snapshot comes from `export-sqlite` (nightly cron and `POST /api/admin/export`).
 - SQLite: `journal_mode=DELETE` (never WAL: the database must stay one self-contained file, because the snapshot copies it and a restore swaps it in whole), `foreign_keys=ON`, `busy_timeout=5000`. The database lives on the instance root volume (`/data/kb.db`) and is snapshotted to S3 after every write (`kb/snapshot.py`; the hook is in `kb/db.py`).
 - Embedding and reranking run in a thread pool (`run_in_threadpool`), never on the event loop.

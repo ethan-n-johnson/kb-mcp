@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS chunks (
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON chunks(doc_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON chunks USING GIN (tsv);
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops);
 
 CREATE TABLE IF NOT EXISTS doc_tags (
     doc_id  BIGINT NOT NULL REFERENCES docs(id) ON DELETE CASCADE,

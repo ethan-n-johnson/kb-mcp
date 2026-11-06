@@ -9,7 +9,7 @@ from kb import service
 from tests.conftest import AUTH, OpenApp, Svc
 from tests.corpus import EBS, ELB, S3, VPC
 from tests.fakes import FakeEmbedder
-from tests.helpers import load_corpus, search, upload
+from tests.helpers import client_searchable_doc_ids, load_corpus, search, upload
 from tests.ops_helpers import add_gap, audit_rows, get_doc, rows, scalar
 
 pytestmark = pytest.mark.dual
@@ -77,8 +77,7 @@ def test_search_hits_the_target_for_the_sources_content(open_app: OpenApp) -> No
         merge(client, ids["vpc"], [ids["s3"], ids["elb"]])
         after = search(client, "Which S3 feature moves old objects to Glacier automatically?")
         health = client.get("/healthz").json()
-        index = client.app.state.search.index
-        index_docs = index.doc_ids()
+        index_docs = client_searchable_doc_ids(client)
         total_chunks = scalar(client, "SELECT count(*) FROM chunks")
     assert before["results"][0]["doc_id"] == ids["s3"]
     assert after["mode"] == "semantic"
@@ -124,7 +123,7 @@ def test_delete_sources_false_keeps_them(open_app: OpenApp) -> None:
         ids = two_sources(client)
         body = merge(client, ids["vpc"], [ids["s3"]], delete_sources=False).json()
         s3_still = client.get(f"/api/docs/{ids['s3']}").status_code
-        in_index = client.app.state.search.index.doc_ids()
+        in_index = client_searchable_doc_ids(client)
     assert body["deleted"] == [] and body["merged"] == [ids["s3"]]
     assert s3_still == 200 and {ids["s3"], ids["vpc"]} <= in_index
 
@@ -224,7 +223,7 @@ def test_a_failure_inside_the_transaction_rolls_everything_back(
         monkeypatch.undo()
         after = get_doc(client, ids["vpc"])
         survivors = scalar(client, "SELECT count(*) FROM docs")
-        still_indexed = client.app.state.search.index.doc_ids()
+        still_indexed = client_searchable_doc_ids(client)
         assert audit_rows(client) == audits
     assert after == before and survivors == 3  # sources not deleted, target not changed
     assert still_indexed == set(ids.values())
@@ -262,7 +261,7 @@ def test_merging_while_models_are_down_stores_null_vectors_and_drops_the_index(
         nulls = scalar(client, "SELECT count(*) FROM chunks WHERE embedding IS NULL")
         target_chunks = scalar(client, "SELECT count(*) FROM chunks WHERE doc_id = ?", ids["vpc"])
         chunks = scalar(client, "SELECT count(*) FROM chunks")
-        indexed = client.app.state.search.index.doc_ids()
+        indexed = client_searchable_doc_ids(client)
     # Only the merged doc lost its vectors; the untouched ELB doc keeps its own.
     assert nulls == target_chunks < chunks
     assert indexed == {ids["elb"]}

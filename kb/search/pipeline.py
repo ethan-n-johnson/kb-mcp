@@ -2,13 +2,13 @@
 
 Semantic path (models healthy, toggle off), all under `KB_SEARCH_TIMEOUT`:
 embed the query, take the top `KB_RERANK_CANDIDATES` cosine matches (15), union
-the FTS5 top 5, rerank the union with the cross-encoder (each passage cut to
+the keyword top 5, rerank the union with the cross-encoder (each passage cut to
 `KB_RERANK_MAX_CHARS`, 1000 characters), keep at most 2 chunks per document and
 return the top `k`. Without the reranker the top 30 cosine matches are ranked
 directly. The smaller rerank pool and the cut passages came from phase 11: on
 the t3.medium, reranking 40 full chunks took longer than the 3 second timeout,
 so every search fell back to keyword. A timeout or any exception falls through to the keyword path
-(FTS5 + BM25). With `KB_RERANK=off` there is no union and no cross-encoder:
+(SQLite: FTS5 + BM25; PostgreSQL: tsvector + `ts_rank_cd`). With `KB_RERANK=off` there is no union and no cross-encoder:
 candidates are ranked by cosine and judged against the cosine cutoffs.
 
 Model and database work runs in worker threads via `run_in_threadpool`. When
@@ -17,8 +17,13 @@ finishes in the background (holding one pool slot) and its result is discarded,
 while the keyword fallback answers immediately. `tests/test_search.py` pins that
 the fallback does not wait for the slow model.
 
-Each search opens its own SQLite connection(s) inside the worker threads, so it
-never shares a connection with a request or with another search.
+Where the candidates come from depends on the store (`kb/search/candidates.py`):
+SQLite uses the in-memory numpy index and FTS5, PostgreSQL uses pgvector and
+`tsvector`. Everything after retrieval is the same in both.
+
+Each search opens its own store connection(s) inside the worker threads (SQLite:
+a new connection; PostgreSQL: one checked out of the pool), so it never shares a
+connection with a request or with another search.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from starlette.concurrency import run_in_threadpool
 
 from kb import db, metrics
 from kb.schemas import SearchHit, SearchResult
+from kb.search import candidates as sources
 from kb.search.embedder import passage_text
 from kb.search.state import SearchState
 from kb.search.text import normalize_query, query_terms, snippet_from
@@ -83,16 +89,6 @@ async def _in_thread(fn: Callable[..., T], *args: object) -> T:
 
 
 # --- SQL helpers ----------------------------------------------------------------
-
-
-def _tagged_doc_ids(conn: Store, tags: list[str]) -> list[int]:
-    marks = ",".join("?" * len(tags))
-    rows = conn.execute(
-        f"SELECT doc_id FROM doc_tags WHERE tag IN ({marks})"
-        " GROUP BY doc_id HAVING count(DISTINCT tag) = ?",
-        [*tags, len(tags)],
-    ).fetchall()
-    return [r["doc_id"] for r in rows]
 
 
 def _candidate(row: Any) -> _Candidate:
@@ -151,18 +147,19 @@ def semantic_confidence(top_score: float | None, high: float, low: float) -> str
 def _retrieve(
     state: SearchState, query: str, qvec: np.ndarray, tags: list[str]
 ) -> list[_Candidate]:
-    """Top cosine matches (plus, when reranking, the FTS top 5) as candidates."""
+    """Top cosine matches (plus, when reranking, the keyword top 5) as candidates."""
     conn = open_store(state.settings)
     try:
-        allowed = _tagged_doc_ids(conn, tags) if tags else None
         pool = SEMANTIC_CANDIDATES
         if state.rerank_enabled:
             pool = min(pool, state.settings.rerank_candidates)
-        hits = state.index.top_k(qvec, pool, allowed)
+        hits = sources.vector_candidates(conn, state, qvec, pool, tags)
         cosines = {chunk_id: score for chunk_id, _, score in hits}
         ids = [chunk_id for chunk_id, _, _ in hits]
         if state.rerank_enabled:
-            for row in conn.fts_rows(query_terms(query), tags, FTS_CANDIDATES, with_snippet=False):
+            for row in sources.keyword_candidates(
+                conn, query_terms(query), FTS_CANDIDATES, tags, with_snippet=False
+            ):
                 if row["chunk_id"] not in ids:
                     ids.append(row["chunk_id"])
         loaded = _hydrate(conn, ids)
@@ -207,11 +204,11 @@ async def _semantic(state: SearchState, query: str, k: int, tags: list[str]) -> 
 
 
 def _keyword(state: SearchState, query: str, k: int, tags: list[str]) -> SearchResult:
-    """FTS5 MATCH with BM25 ranking. Confidence is `medium` at best, never `high`."""
+    """Full-text ranking (BM25 / `ts_rank_cd`). Confidence is `medium` at best, never `high`."""
     terms = query_terms(query)
     conn = open_store(state.settings)
     try:
-        rows = conn.fts_rows(terms, tags, max(k * 4, 20), with_snippet=True)
+        rows = sources.keyword_candidates(conn, terms, max(k * 4, 20), tags, with_snippet=True)
         cands: list[_Candidate] = []
         for row in rows:
             cand = _candidate(row)
@@ -220,7 +217,7 @@ def _keyword(state: SearchState, query: str, k: int, tags: list[str]) -> SearchR
             cands.append(cand)
         kept = _cap_per_doc(cands, k)
         confidence = "low"
-        if kept and conn.fts_covers(terms, kept[0].chunk_id):
+        if kept and sources.keyword_covers(conn, terms, kept[0].chunk_id):
             confidence = "medium"
     finally:
         conn.close()

@@ -83,9 +83,12 @@ def publish_doc(conn: Store, state: SearchState, doc_id: int) -> int:
     Replaces whatever the index had for the doc in one step, so an update that
     rewrote the chunks never leaves stale chunk ids behind. A doc that no longer
     exists is removed from the index. Returns the number of vectors published.
+
+    In PostgreSQL mode the vectors are searched where they are stored, so there
+    is no index to keep in step and nothing is published (returns 0).
     """
     embedder = state.embedder
-    if embedder is None:
+    if embedder is None or state.vectors_in_db:
         return 0
     rows = conn.execute(
         "SELECT id, embedding FROM chunks"
@@ -106,6 +109,11 @@ def publish_doc(conn: Store, state: SearchState, doc_id: int) -> int:
         state.index.remove_doc(doc_id)
         return 0
     return len(rows)
+
+
+def count_vectors(conn: Store) -> int:
+    """Number of chunks that have an embedding (what PostgreSQL mode can search)."""
+    return int(conn.execute("SELECT count(*) FROM chunks WHERE embedding IS NOT NULL").fetchone()[0])
 
 
 def backfill(conn: Store, state: SearchState, batch_size: int = BACKFILL_BATCH) -> int:
@@ -142,7 +150,11 @@ def backfill(conn: Store, state: SearchState, batch_size: int = BACKFILL_BATCH) 
 
 
 def _start_sync(state: SearchState) -> None:
-    """Load the models, backfill missing vectors and build the index (blocking)."""
+    """Load the models, backfill missing vectors and build the index (blocking).
+
+    In PostgreSQL mode there is no index to build: `indexed` counts the usable
+    vectors in the database instead, which is what `/healthz` `index_size` reports.
+    """
     started = time.perf_counter()
     for model in (state.embedder, state.reranker):
         if model is not None:
@@ -153,7 +165,10 @@ def _start_sync(state: SearchState) -> None:
         backfilled = backfill(conn, state)
         indexed = 0
         if state.embedder is not None and state.embedder.healthy:
-            indexed = state.index.load_from_db(conn, state.embedder.model_name)
+            if state.vectors_in_db:
+                indexed = count_vectors(conn)
+            else:
+                indexed = state.index.load_from_db(conn, state.embedder.model_name)
         chunks = int(conn.execute("SELECT count(*) FROM chunks").fetchone()[0])
     finally:
         conn.close()

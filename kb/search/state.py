@@ -3,7 +3,9 @@
 One `SearchState` lives on `app.state.search` (and, from phase 09, in the stdio
 MCP process). Models are injected, so tests pass the doubles from
 `tests/fakes.py`; production builds the real ones with `create_models`.
-The index belongs to the state, never to a database connection.
+The index belongs to the state, never to a database connection. It is used
+only with SQLite; in PostgreSQL mode the vectors stay in the database
+(`vectors_in_db`) and the index stays empty.
 """
 
 from __future__ import annotations
@@ -75,6 +77,11 @@ class SearchState:
     def db_path(self) -> str:
         """Path of the SQLite file (each search opens its own connection)."""
         return self.settings.db_path
+
+    @property
+    def vectors_in_db(self) -> bool:
+        """True when cosine search runs in the database (PostgreSQL), not in `index`."""
+        return self.settings.dialect == "postgres"
 
     @property
     def rerank_enabled(self) -> bool:

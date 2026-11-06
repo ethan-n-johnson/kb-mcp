@@ -16,11 +16,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kb import db
+from kb.config import Settings
+from kb.store import open_store
+from kb.store.postgres import LOCK_WRITE
 from tests.conftest import AUTH, OpenApp
 from tests.corpus import DOCS, EBS, S3
 from tests.fakes import FakeEmbedder
 from tests.helpers import load_corpus, upload
 from tests.ops_helpers import EBS_EDITED, ProbeEmbedder, audit_rows, post_doc, scalar
+
+pytestmark = pytest.mark.dual
 
 DUP = {"KB_DUP_THRESHOLD": 0.8}
 SKIPPED = "skipped: models unavailable"
@@ -148,11 +153,13 @@ def test_chunks_are_embedded_once_and_stored_with_the_upload(open_app: OpenApp) 
     assert embedder.passages_embedded == chunks == stored == index_size
 
 
-def test_embedding_happens_before_the_write_transaction(open_app: OpenApp, db_path) -> None:
+def test_embedding_happens_before_the_write_transaction(
+    open_app: OpenApp, db_path, backend: str
+) -> None:
     """While the embedder runs, the database is neither written nor locked."""
     seen: list[tuple[int, bool]] = []
 
-    def probe() -> None:
+    def probe_sqlite() -> None:
         other = db.connect(db_path)
         other.execute("PRAGMA busy_timeout=50")
         try:
@@ -164,6 +171,20 @@ def test_embedding_happens_before_the_write_transaction(open_app: OpenApp, db_pa
             seen.append((-1, False))
         finally:
             other.close()
+
+    def probe_postgres() -> None:
+        other = open_store(Settings.from_env())
+        try:
+            docs = int(other.execute("SELECT count(*) FROM docs").fetchone()[0])
+            # The write transaction holds this advisory lock; a free lock means none is open.
+            got = bool(other.execute("SELECT pg_try_advisory_lock(?)", (LOCK_WRITE,)).fetchone()[0])
+            if got:
+                other.execute("SELECT pg_advisory_unlock(?)", (LOCK_WRITE,))
+            seen.append((docs, got))
+        finally:
+            other.close()
+
+    probe = probe_sqlite if backend == "sqlite" else probe_postgres
 
     with open_app(ProbeEmbedder(probe), **DUP) as client:
         upload(client, EBS)

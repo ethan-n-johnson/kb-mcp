@@ -21,6 +21,7 @@ from kb.evaluate import load_questions
 from kb.seed import Entry, Manifest, ManifestError, load_manifest, seed, summary
 from tests.conftest import Svc
 from tests.corpus import EBS, ELB, S3, VPC
+from tests.helpers import searchable_chunk_count
 
 ROOT = Path(__file__).resolve().parent.parent
 HTML = (Path(__file__).parent / "fixtures" / "aws_like.html").read_bytes()
@@ -165,7 +166,7 @@ def test_seed_stores_every_entry_through_the_upload_path(svc: Svc, manifest: Man
     assert tags == ["aws", "ebs"]
     # Same write path as an upload: vectors stored and indexed, audited as `cli`.
     assert svc.conn.execute("SELECT count(*) FROM chunks WHERE embedding IS NULL").fetchone()[0] == 0
-    assert len(svc.state.index) == svc.conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
+    assert searchable_chunk_count(svc.state, svc.conn) == svc.conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
     actors = {r[0] for r in svc.conn.execute("SELECT DISTINCT token_name FROM audit_log")}
     assert actors == {"cli"}
 
