@@ -1,10 +1,14 @@
 # Phase 21: Search on pgvector and PostgreSQL full-text search
 
-**Days:** Tue Nov 3 to Wed Nov 4 · **Depends on:** 20 · **Where:** local, then AWS · **PLAN.md sections:** Search
+**Days:** Fri Nov 6 to Sat Nov 7 · **Depends on:** 20 · **Where:** local, then AWS · **PLAN.md sections:** Search
 
 ## Goal
 
 In PostgreSQL mode, candidates come from the database instead of process memory: cosine top-k from pgvector and keyword candidates from `tsvector`. The reranker, the 2-per-doc cap, confidence, the timeout fallback and the toggle work as before. The eval still passes.
+
+## Already done in phase 20
+
+Read the phase 20 deviation ("Phase 2: PostgreSQL backend") before planning. Keyword search already runs on PostgreSQL (`fts_rows` and `fts_covers` in `kb/store/postgres.py`, `plainto_tsquery` ranked by `ts_rank_cd`), and the numpy index already loads from the stored `vector(384)` column. What is left: vector candidates from pgvector instead of process memory (task 1), dupes and gap resolution on the same interface (task 2), no numpy index in PostgreSQL mode (task 3), and an eval that runs PostgreSQL's own search, not the temporary SQLite export phase 20 used (task 6). Task 3 is what phase 22 needs: with a per-process index, a doc written on one instance is invisible to searches on the other.
 
 ## Read first
 

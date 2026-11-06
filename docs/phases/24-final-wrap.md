@@ -1,6 +1,6 @@
 # Phase 24: Final README, extension test and submission
 
-**Days:** Mon Nov 9 to Wed Nov 11 (Thu Nov 12 is buffer; due Fri Nov 13) · **Depends on:** 23 · **Where:** local + AWS · **PLAN.md sections:** Course alignment; Demo corpus and demo script
+**Days:** Wed Nov 11 to Thu Nov 12 (due Fri Nov 13) · **Depends on:** 23 · **Where:** local + AWS · **PLAN.md sections:** Course alignment; Demo corpus and demo script
 
 ## Goal
 

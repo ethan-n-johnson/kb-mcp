@@ -10,3 +10,4 @@ dist/
 *.zip
 *.egg-info/
 .claude/
+loadtest/results/*_stats_history.csv

@@ -1,6 +1,6 @@
 # Phase 22: Stateless app and scale-out
 
-**Days:** Thu Nov 5 to Fri Nov 6 · **Depends on:** 21 · **Where:** local, then AWS · **PLAN.md sections:** Course alignment (Elasticity, High availability); AWS deployment
+**Days:** Sun Nov 8 to Mon Nov 9 · **Depends on:** 21 · **Where:** local, then AWS · **PLAN.md sections:** Course alignment (Elasticity, High availability); AWS deployment
 
 ## Goal
 
