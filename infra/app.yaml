@@ -159,6 +159,11 @@ Resources:
     Properties:
       Type: application
       Scheme: internet-facing
+      # Explicit so the relationship with uvicorn's --timeout-keep-alive (75, Dockerfile)
+      # is visible: the target must keep idle connections open longer than this.
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
       SecurityGroups:
         - !Ref AlbSg
       Subnets:

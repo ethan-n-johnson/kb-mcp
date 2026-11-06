@@ -9,7 +9,9 @@ backfill, rebuild without re-embedding, delete, tags and `KB_RERANK=off`.
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Sequence
 
 import numpy as np
@@ -21,7 +23,7 @@ from kb.search import candidates, indexing, pipeline
 from kb.search.embedder import passage_text
 from tests.conftest import AUTH, OpenApp
 from tests.corpus import DOCS, QUERIES
-from tests.helpers import client_searchable_doc_ids, db_conn, gap_rows, load_corpus, search, upload
+from tests.helpers import client_searchable_doc_ids, db_conn, fresh_health, gap_rows, load_corpus, search, upload
 from tests.fakes import FakeEmbedder, FakeReranker
 
 pytestmark = pytest.mark.dual
@@ -238,6 +240,101 @@ def test_reranker_error_falls_back_to_keyword(open_app: OpenApp) -> None:
         assert search(client, "attach EBS volume Linux")["mode"] == "semantic"
 
 
+# --- admission control (phase 23a) ---------------------------------------------------
+
+
+def _until(condition: Any, timeout: float = 5.0) -> bool:
+    """Poll `condition()` until it is true or `timeout` seconds pass."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.02)
+    return bool(condition())
+
+
+def _slot_free(client: TestClient) -> bool:
+    async def free() -> bool:
+        return not client.app.state.search.semantic_slots().locked()
+
+    return bool(client.portal.call(free))
+
+
+def _search_via_portal(client: TestClient, query: str) -> Any:
+    return client.portal.call(pipeline.search, client.app.state.search, query)
+
+
+def test_a_second_search_goes_to_keyword_at_once_while_the_only_slot_is_taken(
+    open_app: OpenApp, caplog: pytest.LogCaptureFixture
+) -> None:
+    embedder = FakeEmbedder()
+    embedder.gate = threading.Event()
+    query = QUERIES["ebs_linux"][0]
+    with open_app(embedder, KB_SEMANTIC_CONCURRENCY=1, KB_SEARCH_TIMEOUT="0.4") as client:
+        load_corpus(client)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            try:
+                first = pool.submit(_search_via_portal, client, query)
+                assert _until(lambda: embedder.active == 1)
+                started = time.perf_counter()
+                with caplog.at_level(logging.WARNING):
+                    second = _search_via_portal(client, query)
+                elapsed = time.perf_counter() - started
+                assert second.mode == "keyword" and second.results
+                assert elapsed < 1.5  # the budget, not the wait for the blocked model
+                assert len(embedder.query_calls) == 1  # the second search never embedded
+                assert any("semantic search busy" in r.getMessage() for r in caplog.records)
+                assert first.result(timeout=5).mode == "keyword"  # timed out on the closed gate
+                # The timed-out search still holds the slot: its thread has not returned.
+                assert not _slot_free(client)
+                assert _search_via_portal(client, query).mode == "keyword"
+                assert len(embedder.query_calls) == 1
+            finally:
+                embedder.gate.set()
+        assert _until(lambda: _slot_free(client))  # released when the thread finished
+        assert _search_via_portal(client, query).mode == "semantic"
+
+
+def test_twenty_concurrent_searches_never_run_more_embeddings_than_the_limit(open_app: OpenApp) -> None:
+    embedder = FakeEmbedder()
+    query = QUERIES["ebs_linux"][0]
+    with open_app(embedder, KB_SEMANTIC_CONCURRENCY=2, KB_SEARCH_TIMEOUT="0.5") as client:
+        load_corpus(client)
+        embedder.delay = 0.3  # slower than the budget allows for the later searches
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            results = list(pool.map(lambda _: _search_via_portal(client, query), range(20)))
+        modes = {r.mode for r in results}
+        assert modes == {"semantic", "keyword"}
+        assert all(r.results for r in results)
+        assert _until(lambda: embedder.active == 0 and _slot_free(client))
+    assert embedder.max_active <= 2
+    assert len(embedder.query_calls) < 20  # the rest were answered without touching the model
+
+
+def test_an_abandoned_search_stops_after_its_current_step_and_frees_its_slot(open_app: OpenApp) -> None:
+    embedder, reranker = FakeEmbedder(), FakeReranker()
+    query = QUERIES["ebs_linux"][0]
+    with open_app(embedder, reranker, KB_SEMANTIC_CONCURRENCY=1, KB_SEARCH_TIMEOUT="0.2") as client:
+        load_corpus(client)
+        reranker.score_calls.clear()
+        embedder.delay = 0.6
+        assert _search_via_portal(client, query).mode == "keyword"
+        assert _until(lambda: _slot_free(client))
+        assert reranker.score_calls == []  # nobody was waiting for it, so the rerank step never ran
+
+
+def test_a_failing_abandoned_search_frees_its_slot(open_app: OpenApp) -> None:
+    embedder = FakeEmbedder()
+    query = QUERIES["ebs_linux"][0]
+    with open_app(embedder, KB_SEMANTIC_CONCURRENCY=1, KB_SEARCH_TIMEOUT="0.2") as client:
+        load_corpus(client)
+        embedder.delay, embedder.fail = 0.5, True
+        assert _search_via_portal(client, query).mode == "keyword"
+        assert _until(lambda: _slot_free(client))
+        embedder.delay, embedder.fail = 0.0, False
+        assert _search_via_portal(client, query).mode == "semantic"
+
+
 def test_unhealthy_models_mean_keyword_mode_and_healthz_stays_200(open_app: OpenApp) -> None:
     embedder, reranker = FakeEmbedder(), FakeReranker()
     with open_app(embedder, reranker) as client:
@@ -252,7 +349,7 @@ def test_unhealthy_models_mean_keyword_mode_and_healthz_stays_200(open_app: Open
         assert health.status_code == 200
         assert (health.json()["mode"], health.json()["models"]["reranker"]) == ("keyword", "failed")
         reranker.healthy, embedder.healthy = True, False
-        assert client.get("/healthz").json()["mode"] == "keyword"
+        assert fresh_health(client)["mode"] == "keyword"
 
 
 def test_models_that_fail_to_load_leave_the_server_in_keyword_mode(open_app: OpenApp) -> None:
@@ -292,12 +389,12 @@ def test_toggle_forces_keyword_and_back(open_app: OpenApp) -> None:
         assert search(client, q)["mode"] == "semantic"
 
         assert client.post("/api/admin/fallback", json={"on": True}).status_code == 401
-        assert client.get("/healthz").json()["fallback_toggle"] is False
+        assert fresh_health(client)["fallback_toggle"] is False
 
         resp = client.post("/api/admin/fallback", json={"on": True}, headers=AUTH)
         assert resp.status_code == 200 and resp.json() == {"fallback_toggle": True}
         assert search(client, q)["mode"] == "keyword"
-        health = client.get("/healthz").json()
+        health = fresh_health(client)
         assert (health["mode"], health["fallback_toggle"]) == ("keyword", True)
         assert health["models"] == {"embedder": "ok", "reranker": "ok"}
 
@@ -405,11 +502,11 @@ def test_tags_filter_applies_to_fts_union(open_app: OpenApp) -> None:
 def test_upload_embeds_chunks_and_updates_the_index(open_app: OpenApp) -> None:
     embedder = FakeEmbedder()
     with open_app(embedder) as client:
-        assert client.get("/healthz").json()["index_size"] == 0
+        assert fresh_health(client)["index_size"] == 0
         md, tags = DOCS["ebs"]
         doc_id = upload(client, md, tags)
         chunks = client.get(f"/api/docs/{doc_id}", params={"include_chunks": "true"}).json()["chunks"]
-        health = client.get("/healthz").json()
+        health = fresh_health(client)
         conn = db_conn(client)
         rows = conn.execute("SELECT id, embedding, embed_model, text, heading_path FROM chunks").fetchall()
         conn.close()
@@ -432,7 +529,7 @@ def test_embedding_failure_after_upload_is_logged_and_left_for_backfill(
             resp = client.post("/api/docs", json={"content": md}, headers=AUTH)
         assert resp.status_code == 201  # the document is stored regardless
         doc_id = resp.json()["doc_id"]
-        assert client.get("/healthz").json()["index_size"] == 0
+        assert fresh_health(client)["index_size"] == 0
         conn = db_conn(client)
         assert conn.execute("SELECT count(*) FROM chunks WHERE embedding IS NULL").fetchone()[0] == 3
         conn.close()
@@ -442,7 +539,7 @@ def test_embedding_failure_after_upload_is_logged_and_left_for_backfill(
     # The next startup backfills it.
     fresh = FakeEmbedder()
     with open_app(fresh) as client:
-        assert client.get("/healthz").json()["index_size"] == 3
+        assert fresh_health(client)["index_size"] == 3
         assert fresh.passages_embedded == 3
         assert search(client, QUERIES["s3_lifecycle"][0])["results"][0]["doc_id"] == doc_id
 
@@ -469,10 +566,10 @@ def test_delete_removes_the_doc_from_the_index_and_results(open_app: OpenApp) ->
         ids = load_corpus(client)
         q = QUERIES["s3_lifecycle"][0]
         assert search(client, q)["results"][0]["doc_id"] == ids["s3"]
-        before = client.get("/healthz").json()["index_size"]
+        before = fresh_health(client)["index_size"]
         assert client.delete(f"/api/docs/{ids['s3']}", headers=AUTH).status_code == 200
         body = search(client, q)
-        after = client.get("/healthz").json()["index_size"]
+        after = fresh_health(client)["index_size"]
         keyword = search(client, "glacier lifecycle", **{})
         assert ids["s3"] not in client_searchable_doc_ids(client)
     assert all(r["doc_id"] != ids["s3"] for r in body["results"] + keyword["results"])
@@ -521,11 +618,11 @@ def test_startup_backfills_null_and_stale_embeddings(open_app: OpenApp) -> None:
         total = conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
         assert conn.execute("SELECT count(*) FROM chunks WHERE embedding IS NULL").fetchone()[0] == total
         conn.close()
-        assert client.get("/healthz").json()["models"] == {"embedder": "off", "reranker": "off"}
+        assert fresh_health(client)["models"] == {"embedder": "off", "reranker": "off"}
 
     embedder = FakeEmbedder()
     with open_app(embedder) as client:
-        health = client.get("/healthz").json()
+        health = fresh_health(client)
         body = search(client, QUERIES["nat"][0])
         conn = db_conn(client)
         null_left = conn.execute("SELECT count(*) FROM chunks WHERE embedding IS NULL").fetchone()[0]
@@ -540,7 +637,7 @@ def test_startup_backfills_null_and_stale_embeddings(open_app: OpenApp) -> None:
 
     again = FakeEmbedder()
     with open_app(again) as client:
-        assert client.get("/healthz").json()["index_size"] == total
+        assert fresh_health(client)["index_size"] == total
     assert again.passages_embedded == 1  # only the chunk from the "old" model
 
 
@@ -550,7 +647,7 @@ def test_backfill_works_in_batches_of_64(open_app: OpenApp) -> None:
             upload(client, f"# Doc {n}\n\n" + f"batch filler text number{n} " * 20)
     embedder = FakeEmbedder()
     with open_app(embedder) as client:
-        assert client.get("/healthz").json()["index_size"] == 70
+        assert fresh_health(client)["index_size"] == 70
     assert [len(batch) for batch in embedder.passage_calls] == [64, 6]
 
 
@@ -558,13 +655,13 @@ def test_restart_rebuilds_the_index_without_embedding(open_app: OpenApp) -> None
     first = FakeEmbedder()
     with open_app(first) as client:
         ids = load_corpus(client)
-        size = client.get("/healthz").json()["index_size"]
+        size = fresh_health(client)["index_size"]
         expected = search(client, QUERIES["elb_health"][0])
     assert first.passages_embedded == size
 
     second = FakeEmbedder()  # a replacement instance: new process, same database
     with open_app(second) as client:
-        assert client.get("/healthz").json()["index_size"] == size
+        assert fresh_health(client)["index_size"] == size
         again = search(client, QUERIES["elb_health"][0])
     assert second.passage_calls == [], "restart must not re-embed any chunk"
     assert [r["chunk_id"] for r in again["results"]] == [r["chunk_id"] for r in expected["results"]]
@@ -625,7 +722,7 @@ def test_rerank_off_ranks_by_cosine_with_cosine_cutoffs(open_app: OpenApp) -> No
     embedder = FakeEmbedder()
     with open_app(embedder, KB_RERANK="off") as client:
         load_corpus(client)
-        health = client.get("/healthz").json()
+        health = fresh_health(client)
         q = QUERIES["nat"][0]
         body = search(client, q)
         qvec = embedder.embed_query(q)
@@ -681,7 +778,7 @@ def test_kb_fake_models_env_swaps_in_the_doubles(
     monkeypatch.setenv("KB_WRITE_TOKENS", "test:testtoken")
     config.clear_token_cache()
     with TestClient(create_app()) as client:
-        assert client.get("/healthz").json()["models"] == {"embedder": "ok", "reranker": "ok"}
+        assert fresh_health(client)["models"] == {"embedder": "ok", "reranker": "ok"}
         load_corpus(client)
         assert search(client, QUERIES["nat"][0])["mode"] == "semantic"
     config.clear_token_cache()
@@ -698,7 +795,7 @@ def test_fake_models_env_is_ignored_when_models_are_off(
     monkeypatch.setenv("KB_FAKE_MODELS", "1")
     config.clear_token_cache()
     with TestClient(create_app()) as client:
-        assert client.get("/healthz").json()["mode"] == "keyword"
+        assert fresh_health(client)["mode"] == "keyword"
 
 
 # --- rerank pool size and passage cut (phase 11: t3.medium timing) ----------------------

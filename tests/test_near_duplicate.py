@@ -22,7 +22,7 @@ from kb.store.postgres import LOCK_WRITE
 from tests.conftest import AUTH, OpenApp
 from tests.corpus import DOCS, EBS, S3
 from tests.fakes import FakeEmbedder
-from tests.helpers import load_corpus, upload
+from tests.helpers import fresh_health, load_corpus, upload
 from tests.ops_helpers import EBS_EDITED, ProbeEmbedder, audit_rows, post_doc, scalar
 
 pytestmark = pytest.mark.dual
@@ -148,7 +148,7 @@ def test_chunks_are_embedded_once_and_stored_with_the_upload(open_app: OpenApp) 
         doc_id = upload(client, EBS)
         chunks = scalar(client, "SELECT count(*) FROM chunks WHERE doc_id = ?", doc_id)
         stored = scalar(client, "SELECT count(*) FROM chunks WHERE embedding IS NOT NULL")
-        index_size = client.get("/healthz").json()["index_size"]
+        index_size = fresh_health(client)["index_size"]
     assert len(embedder.passage_calls) == 1  # one batch for the whole doc, nothing twice
     assert embedder.passages_embedded == chunks == stored == index_size
 
@@ -194,9 +194,9 @@ def test_embedding_happens_before_the_write_transaction(
 def test_a_possible_duplicate_leaves_the_index_alone(open_app: OpenApp) -> None:
     with open_app(**DUP) as client:
         upload(client, EBS)
-        size = client.get("/healthz").json()["index_size"]
+        size = fresh_health(client)["index_size"]
         post_doc(client, EBS_EDITED)
-        assert client.get("/healthz").json()["index_size"] == size
+        assert fresh_health(client)["index_size"] == size
 
 
 def test_stored_vector_is_the_normalized_chunk_embedding(open_app: OpenApp) -> None:

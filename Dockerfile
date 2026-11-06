@@ -62,4 +62,6 @@ EXPOSE 8000
 # uvicorn's own proxy handling is off: with --forwarded-allow-ips '*' it trusts the
 # left-most X-Forwarded-For entry, which the caller chooses. kb.clientip counts from
 # the right instead (KB_PROXY_HOPS, set in the instance user data).
-CMD ["uvicorn", "kb.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-proxy-headers"]
+# --timeout-keep-alive 75 stays above the ALB idle timeout (60 s, infra/app.yaml): a
+# target that closes an idle connection first races the ALB reusing it (a 502).
+CMD ["uvicorn", "kb.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-proxy-headers", "--timeout-keep-alive", "75"]

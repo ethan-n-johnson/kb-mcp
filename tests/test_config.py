@@ -169,6 +169,16 @@ def test_rerank_settings_are_read_and_validated() -> None:
             Settings.from_env(bad)
 
 
+def test_semantic_concurrency_is_read_and_validated() -> None:
+    Settings = config.Settings
+    assert Settings().semantic_concurrency == 2
+    assert Settings.from_env({}).semantic_concurrency == 2
+    assert Settings.from_env({"KB_SEMANTIC_CONCURRENCY": "4"}).semantic_concurrency == 4
+    for bad in ("0", "-1", "abc", "1.5"):
+        with pytest.raises(ValueError, match="KB_SEMANTIC_CONCURRENCY"):
+            Settings.from_env({"KB_SEMANTIC_CONCURRENCY": bad})
+
+
 # --- database URL (PostgreSQL mode) ---------------------------------------------------
 
 URL = "postgresql://kbadmin:s3cretpw@db.example:5432/kb?sslmode=require"

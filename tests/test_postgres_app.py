@@ -18,7 +18,7 @@ from kb.search import candidates
 from kb.search.index import VectorIndex
 from tests.conftest import AUTH, OpenApp
 from tests.corpus import DOCS, QUERIES
-from tests.helpers import db_conn, load_corpus, search, upload
+from tests.helpers import db_conn, fresh_health, load_corpus, search, upload
 
 pytestmark = pytest.mark.pg
 
@@ -31,9 +31,9 @@ def _postgres(pg_store):  # noqa: ANN001 - fixture that selects the PostgreSQL l
 def test_healthz_reports_chunks_and_holds_no_connection(open_app: OpenApp) -> None:
     with open_app() as client:
         assert client.app.state.conn is None
-        assert client.get("/healthz").json()["chunks"] == 0
+        assert fresh_health(client)["chunks"] == 0
         load_corpus(client)
-        body = client.get("/healthz").json()
+        body = fresh_health(client)
     assert body["status"] == "ok" and body["mode"] == "semantic"
     assert body["chunks"] > 0 and body["index_size"] == body["chunks"]
 
@@ -73,7 +73,7 @@ def test_an_unanswerable_question_logs_a_gap(open_app: OpenApp) -> None:
 def test_a_restart_reports_the_stored_vectors_without_re_embedding(open_app: OpenApp) -> None:
     with open_app() as client:
         ids = load_corpus(client)
-        first = client.get("/healthz").json()["index_size"]
+        first = fresh_health(client)["index_size"]
     embedder_calls = []
     from tests.fakes import FakeEmbedder
 
@@ -83,7 +83,7 @@ def test_a_restart_reports_the_stored_vectors_without_re_embedding(open_app: Ope
             return super().embed_passages(texts)
 
     with open_app(Counting()) as client:
-        assert client.get("/healthz").json()["index_size"] == first > 0
+        assert fresh_health(client)["index_size"] == first > 0
         assert search(client, QUERIES["nat"][0])["results"][0]["doc_id"] == ids["vpc"]
     assert embedder_calls == []  # nothing was re-embedded
 
@@ -164,11 +164,11 @@ def test_startup_builds_no_numpy_index_and_healthz_counts_embedded_chunks(
             embedded = conn.fetchone("SELECT count(*) AS n FROM chunks WHERE embedding IS NOT NULL")["n"]
         finally:
             conn.close()
-        body = client.get("/healthz").json()
+        body = fresh_health(client)
     assert embedded > 0 and body["index_size"] == embedded
     with open_app() as client:  # a restart: still nothing in memory, the count comes from the table
         assert len(client.app.state.search.index) == 0
-        assert client.get("/healthz").json()["index_size"] == embedded
+        assert fresh_health(client)["index_size"] == embedded
 
 
 def _numpy_index(conn, model: str) -> VectorIndex:  # noqa: ANN001

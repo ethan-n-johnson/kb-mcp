@@ -18,7 +18,8 @@ from kb import snapshot
 from kb.store import Store, close_pools, init_schema, open_store
 from kb.api import register_error_handlers, router as api_router
 from kb.clientip import ClientIpMiddleware
-from kb.config import Settings, get_settings
+from kb.config import get_settings
+from kb.health import HealthMonitor
 from kb.logging import setup_logging
 from kb.mcp_http import mount_mcp
 from kb.mcp_tools import build_mcp
@@ -52,21 +53,6 @@ class CachedStaticFiles(StaticFiles):
         if response.status_code == 200:
             response.headers["Cache-Control"] = f"public, max-age={STATIC_MAX_AGE}"
         return response
-
-
-def _count_chunks(settings: Settings) -> tuple[int, int]:
-    """Chunk count and embedded chunk count on a short-lived connection.
-
-    PostgreSQL mode; runs in a worker thread. One round trip for both numbers.
-    """
-    conn = open_store(settings)
-    try:
-        row = conn.execute(
-            "SELECT count(*), count(embedding) FROM chunks"
-        ).fetchone()
-        return int(row[0]), int(row[1])
-    finally:
-        conn.close()
 
 
 def _add_security(app: FastAPI) -> None:
@@ -120,6 +106,7 @@ def create_app(
             conn.close()
             conn = None
         app.state.conn = conn
+        app.state.health = None
         # Started before the backfill so the vectors it writes are snapshotted too.
         snapshots = snapshot.from_settings(settings)
         app.state.snapshots = snapshots
@@ -128,6 +115,13 @@ def create_app(
         try:
             app.state.search = indexing.build_state(settings, embedder, reranker)
             await indexing.start(app.state.search)
+            if settings.dialect == "postgres" and settings.database_url:
+                # /healthz and the fallback toggle are served from this thread's
+                # own connection, never from the pool the searches use.
+                monitor = HealthMonitor(settings.database_url, app.state.search)
+                app.state.health = monitor
+                await run_in_threadpool(monitor.prime)
+                monitor.start()
             log.info(
                 "startup complete",
                 extra={
@@ -142,6 +136,8 @@ def create_app(
             async with mcp.session_manager.run():
                 yield
         finally:
+            if app.state.health is not None:
+                await run_in_threadpool(app.state.health.stop)
             if snapshots is not None:
                 # SIGTERM from `docker stop` lands here once uvicorn has drained
                 # its requests: upload a last snapshot if a write is still pending.
@@ -165,11 +161,14 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz(request: Request) -> JSONResponse:
-        """Return 200 with status JSON whenever the database is readable, else 503.
+        """Return 200 with status JSON whenever the database was readable within the last 60 s, else 503.
 
         `mode` is `semantic` only when the toggle is off and the models are
         healthy; keyword mode is still a healthy state (200), so a model failure
-        never makes the load balancer replace the instance.
+        never makes the load balancer replace the instance. In PostgreSQL mode
+        the counts come from the cache of `kb.health.HealthMonitor`: this
+        handler never awaits a thread and never takes a pooled connection, so
+        load on the searches cannot make it miss the load balancer's deadline.
         """
         state = request.app.state.search
         try:
@@ -180,7 +179,12 @@ def create_app(
             else:
                 # PostgreSQL: vectors live in the database, so the "index" is the
                 # chunks that have an embedding.
-                count, indexed = await run_in_threadpool(_count_chunks, request.app.state.settings)
+                monitor: HealthMonitor | None = request.app.state.health
+                counts = None if monitor is None else monitor.snapshot()
+                if counts is None:
+                    log.error("health check failed: no recent database read")
+                    return JSONResponse({"status": "error"}, status_code=503)
+                count, indexed = counts
         except Exception:
             log.exception("health check failed")
             return JSONResponse({"status": "error"}, status_code=503)

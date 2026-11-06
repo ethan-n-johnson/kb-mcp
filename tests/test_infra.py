@@ -330,6 +330,18 @@ def test_alb_accepts_http_only_from_the_cloudfront_prefix_list(resources: dict[s
     assert "CidrIp" not in json.dumps(resources["AlbSg"])
 
 
+def test_the_app_keeps_idle_connections_open_longer_than_the_alb_does(resources: dict[str, Any]) -> None:
+    """A target that closes an idle connection before the ALB does races the ALB's reuse of it (502)."""
+    (alb,) = of_type(resources, "AWS::ElasticLoadBalancingV2::LoadBalancer").values()
+    attributes = {a["Key"]: a["Value"] for a in alb["Properties"]["LoadBalancerAttributes"]}
+    idle = int(attributes["idle_timeout.timeout_seconds"])
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    cmd = next(line for line in dockerfile.splitlines() if line.startswith("CMD "))
+    match = re.search(r'"--timeout-keep-alive",\s*"(\d+)"', cmd)
+    assert match, "the Dockerfile CMD has no --timeout-keep-alive"
+    assert int(match.group(1)) > idle
+
+
 def test_outputs(app: dict[str, Any]) -> None:
     out = app["Outputs"]
     assert out["DistributionDomainName"]["Value"] == {"Fn::GetAtt": ["Distribution", "DomainName"]}

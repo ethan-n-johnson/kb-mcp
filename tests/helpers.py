@@ -31,6 +31,19 @@ def search(client: TestClient, q: str, **params: Any) -> dict[str, Any]:
     return resp.json()
 
 
+def fresh_health(client: TestClient) -> dict[str, Any]:
+    """`/healthz` JSON after a new database count.
+
+    In PostgreSQL mode `/healthz` serves the counts a monitor thread cached up to
+    10 s ago (`kb.health.HealthMonitor`), so a test that wrote and wants the new
+    counts asks the monitor for a check first. SQLite mode counts per request.
+    """
+    monitor = getattr(client.app.state, "health", None)
+    if monitor is not None:
+        assert monitor.check_once()
+    return client.get("/healthz").json()
+
+
 def db_conn(client: TestClient) -> Store:
     return open_store(client.app.state.settings)
 
