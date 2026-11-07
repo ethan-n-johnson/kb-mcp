@@ -80,9 +80,12 @@ def test_sqlite_mode_keeps_tickets_in_process_memory(conn: Any) -> None:
 # --- over MCP (HTTP) ---------------------------------------------------------------------
 
 
-def test_upload_file_works_without_a_token(open_app: OpenApp) -> None:
+def test_upload_file_needs_a_token(open_app: OpenApp) -> None:
     with open_app(models=False) as client:
-        link = ok(call(client, "upload_file", {"filename": "guide.pdf"}))
+        refused = call(client, "upload_file", {"filename": "guide.pdf"})
+        assert refused["isError"] and "needs a write token" in refused["content"][0]["text"]
+        assert uploads.STORE.pending() == 0  # no link was handed out
+        link = ok(call(client, "upload_file", {"filename": "guide.pdf"}, token=True))
     assert link["status"] == "upload_link"
     assert uploads.STORE.pending() == 1
 

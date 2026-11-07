@@ -330,14 +330,23 @@ Claude Code reaches the deployed server over HTTPS through CloudFront. Redo the 
    curl -s "$CF/api/search?q=ebs" > /dev/null
    ```
 
-2. Add the server to Claude Code. The MCP tools need no token. If a `kb` server already exists, remove it first:
+2. Add the server to Claude Code. Reading (`search`, `get`, `list_tags`, `stale`, `gaps`) needs no token; the write tools (`upload`, `upload_file`, `update`, `delete`, `merge`, `ingest_url`, `verify`) need a write token over HTTP (phase 24). If a `kb` server already exists, remove it first.
+
+   Read only (what students use):
 
    ```bash
    claude mcp remove kb 2>/dev/null
    claude mcp add --transport http kb "$CF/mcp"
    ```
 
-   Optional: add `--header "Authorization: Bearer <token>"` with a write token from `~/.config/kb-mcp/write-tokens` (the part after the colon) to have your writes recorded under that token's name in the audit log instead of `mcp`.
+   With writes (the instructor, or anyone given a token): add the token, the part after the colon in `~/.config/kb-mcp/write-tokens`, as a header. Its name is recorded in the audit log.
+
+   ```bash
+   claude mcp remove kb 2>/dev/null
+   claude mcp add --transport http kb "$CF/mcp" --header "Authorization: Bearer $KB_TOKEN"
+   ```
+
+   Without the header a write tool answers "This tool needs a write token: add the server with --header ..." and writes nothing.
 
    Start Claude Code and run `/mcp`: `kb` should be connected with 12 tools, `upload_file` among them.
 
@@ -352,7 +361,7 @@ Claude Code reaches the deployed server over HTTPS through CloudFront. Redo the 
    curl -sS --data-binary @"$HOME/Downloads/guide.pdf" "$URL"
    ```
 
-   claude.ai can now add the server as a custom connector with the URL `$CF/mcp` and no authentication (the MCP tools need no token since 2026-10-10). The `upload_file` link still needs something that can run `curl` with a local file, so whole-file uploads stay a Claude Code flow; the other tools work from a claude.ai chat.
+   claude.ai can add the server as a custom connector with the URL `$CF/mcp` and no authentication, but a connector cannot send a bearer header, so from claude.ai it can search and read and cannot write (since phase 24, 2026-11-07; from 2026-10-10 to 2026-11-06 it could). Whole-file uploads need Claude Code anyway, because the upload link is sent with `curl` from a local file.
 
 4. Check that search finds it in semantic mode, for example "What percentage of the SAA-C03 exam is Design Secure Architectures?" in Claude Code, or `curl -s "$CF/api/search?q=SAA-C03+design+secure+architectures+percentage"`. Expect `mode` `semantic` and the new document at the top.
 

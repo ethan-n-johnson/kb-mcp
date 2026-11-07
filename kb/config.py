@@ -45,7 +45,7 @@ class Settings:
     rerank_max_chars: int = 1000
     public_url: str | None = None
     extension_origin: str | None = None
-    search_rate: str = "30/minute"
+    search_rate: str = "120/minute"
     proxy_hops: int = 0
     snapshots: bool = True
     snapshot_interval: float = 5.0

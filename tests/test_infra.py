@@ -33,6 +33,7 @@ PUSH = INFRA / "push-image.sh"
 TEARDOWN = INFRA / "teardown-app.sh"
 UP = INFRA / "up.sh"
 PROBE = INFRA / "probe-rds.sh"
+CAPACITY = INFRA / "class-capacity.sh"
 
 
 # --- template loading ---------------------------------------------------------------------
@@ -80,7 +81,7 @@ def of_type(resources: dict[str, Any], rtype: str) -> dict[str, Any]:
 # --- user data ----------------------------------------------------------------------------
 
 PSEUDO = {"AWS::Region": "us-east-1", "AWS::StackName": "kb-app"}
-PARAMETER_VALUES = {"ImageTag": "abc1234", "MetricsMode": "api", "ExtensionOrigin": "", "DatabaseMode": "sqlite", "SearchRate": "30/minute"}
+PARAMETER_VALUES = {"ImageTag": "abc1234", "MetricsMode": "off", "ExtensionOrigin": "", "DatabaseMode": "sqlite", "SearchRate": "120/minute"}
 
 
 def user_data_parts(resources: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -146,7 +147,7 @@ def _shellcheck() -> str | None:
 def test_rendered_user_data_and_scripts_pass_shellcheck(resources: dict[str, Any], tmp_path: Path) -> None:
     script = tmp_path / "user-data.sh"
     script.write_text(render_user_data(resources), encoding="utf-8")
-    cmd = [_shellcheck() or "", "-s", "bash", str(script), str(SCRIPT), str(DEPLOY), str(PUSH), str(TEARDOWN), str(UP), str(PROBE)]
+    cmd = [_shellcheck() or "", "-s", "bash", str(script), str(SCRIPT), str(DEPLOY), str(PUSH), str(TEARDOWN), str(UP), str(PROBE), str(CAPACITY)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout
 
@@ -166,7 +167,7 @@ def test_container_logs_stay_on_the_instance(resources: dict[str, Any]) -> None:
     # The array is built before the container starts and is what docker run receives.
     assert rendered.index("LOG_OPTS=(") < rendered.index("docker run -d --name kb")
     assert '"${LOG_OPTS[@]}"' in rendered
-    assert "-e KB_METRICS_MODE=api" in rendered
+    assert "-e KB_METRICS_MODE=off" in rendered
     assert "LOG_OPTS=()" not in rendered
     assert of_type(resources, "AWS::Logs::LogGroup") == {}
 
@@ -254,7 +255,7 @@ def test_new_parameters_have_no_defaults_and_validate_their_input(app: dict[str,
     assert re.fullmatch(email["AllowedPattern"], "ethan@example.com")
     for bad in ("ethan", "ethan@example", "a@b.c,d@e.f", "a b@c.de", ""):
         assert not re.fullmatch(email["AllowedPattern"], bad), bad
-    assert params["MetricsMode"]["Default"] == "api" and params["MetricsMode"]["AllowedValues"] == ["emf", "api"]
+    assert params["MetricsMode"]["Default"] == "off" and params["MetricsMode"]["AllowedValues"] == ["off", "emf", "api"]
 
 
 # --- phase 10: CloudFront and the locked ALB ----------------------------------------------
@@ -768,7 +769,7 @@ def test_deploy_app_passes_all_parameters_to_cloudformation(stub_bin: Path) -> N
         "ImageTag=abc1234",
         "CloudFrontPrefixListId=pl-3b927c52",
         "AlertEmail=me@example.com",
-        "MetricsMode=api",
+        "MetricsMode=off",
         "InstanceProfileName=myS3Role",
         "ExtensionOrigin=",
         "DatabaseMode=sqlite",
@@ -1444,7 +1445,7 @@ def test_target_group_drains_in_30_seconds_and_has_no_stickiness(resources: dict
 
 def test_search_rate_is_a_parameter_passed_to_the_container(app: dict[str, Any], resources: dict[str, Any]) -> None:
     param = app["Parameters"]["SearchRate"]
-    assert param["Type"] == "String" and param["Default"] == "30/minute"
+    assert param["Type"] == "String" and param["Default"] == "120/minute"
     pattern = param["AllowedPattern"]
     for good in ("30/minute", "600/minute", "5/second", "1000/hour", "10/day"):
         assert re.fullmatch(pattern, good), good
@@ -1452,7 +1453,7 @@ def test_search_rate_is_a_parameter_passed_to_the_container(app: dict[str, Any],
         assert not re.fullmatch(pattern, bad), bad
     template, _ = user_data_parts(resources)
     assert "-e KB_SEARCH_RATE=${SearchRate}" in template
-    assert "-e KB_SEARCH_RATE=30/minute" in render_user_data(resources, SearchRate="30/minute")
+    assert "-e KB_SEARCH_RATE=120/minute" in render_user_data(resources, SearchRate="120/minute")
     assert "per instance" in param["Description"]
 
 
@@ -1688,3 +1689,86 @@ def test_up_script_never_puts_the_password_or_url_in_a_message() -> None:
         if re.match(r"\s*(echo|step|die|printf\b.*>&2)", line) and re.search(r"\$\{?(KB_)?DB_(PASSWORD|URL)\b|CURRENT_URL", line)
     ]
     assert leaks == []
+
+
+# --- infra/class-capacity.sh (phase 24) -------------------------------------------------------
+
+
+def capacity_bin(tmp_path: Path, *, mode: str = "postgres", max_size: str = "4") -> Path:
+    """A stub `aws` that answers the lookups of class-capacity.sh and logs every call."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "calls.log"
+    make_stub(
+        bin_dir,
+        "aws",
+        f"""echo "aws $*" >> {log}
+case "$*" in
+  *DatabaseMode*) echo {mode} ;;
+  *AsgName*) echo kb-app-AppAsg-TEST ;;
+  *TargetGroupArn*) echo arn:aws:elasticloadbalancing:us-east-1:1:targetgroup/kb/1 ;;
+  *MaxSize*) echo {max_size} ;;
+esac
+""",
+    )
+    return bin_dir
+
+
+def test_class_capacity_up_asks_for_four_and_down_for_two(tmp_path: Path) -> None:
+    bin_dir = capacity_bin(tmp_path)
+    up = run_script(CAPACITY, ["up"], bin_dir)
+    assert up.returncode == 0, up.stderr
+    update = [c for c in calls(bin_dir) if "update-auto-scaling-group" in c]
+    assert len(update) == 1 and "--min-size 4" in update[0] and "--desired-capacity 4" in update[0]
+    assert "kb-app-AppAsg-TEST" in update[0] and "--max-size" not in update[0]
+    down = run_script(CAPACITY, ["down"], bin_dir)
+    assert down.returncode == 0, down.stderr
+    update = [c for c in calls(bin_dir) if "update-auto-scaling-group" in c][-1]
+    assert "--min-size 2" in update and "--desired-capacity 2" in update and "--max-size" not in update
+
+
+def test_class_capacity_refuses_sqlite_mode_and_a_group_with_another_maximum(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    bin_a = capacity_bin(tmp_path / "a", mode="sqlite")
+    bin_b = capacity_bin(tmp_path / "b", max_size="6")
+    sqlite = run_script(CAPACITY, ["up"], bin_a)
+    assert sqlite.returncode == 1 and "postgres" in sqlite.stderr
+    other = run_script(CAPACITY, ["up"], bin_b)
+    assert other.returncode == 1 and "MaxSize" in other.stderr
+    for bin_dir in (bin_a, bin_b):
+        assert not [c for c in calls(bin_dir) if "update-auto-scaling-group" in c]
+
+
+def test_class_capacity_schedule_starts_twenty_minutes_early(tmp_path: Path) -> None:
+    bin_dir = capacity_bin(tmp_path)
+    result = run_script(CAPACITY, ["schedule", "2026-11-12T14:00:00Z", "2026-11-12T15:30:00Z"], bin_dir)
+    assert result.returncode == 0, result.stderr
+    put = [c for c in calls(bin_dir) if "put-scheduled-update-group-action" in c]
+    assert len(put) == 2
+    assert "--scheduled-action-name kb-class-up" in put[0] and "--start-time 2026-11-12T13:40:00Z" in put[0]
+    assert "--min-size 4" in put[0] and "--desired-capacity 4" in put[0]
+    assert "--scheduled-action-name kb-class-down" in put[1] and "--start-time 2026-11-12T15:30:00Z" in put[1]
+    assert "--min-size 2" in put[1] and "--desired-capacity 2" in put[1]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["schedule", "tomorrow", "2026-11-12T15:30:00Z"], ["schedule", "2026-11-12T15:30:00Z", "2026-11-12T14:00:00Z"],
+     ["schedule", "2026-11-12T14:00:00Z"], ["nope"], []],
+)
+def test_class_capacity_rejects_bad_arguments_before_changing_anything(tmp_path: Path, args: list[str]) -> None:
+    bin_dir = capacity_bin(tmp_path)
+    result = run_script(CAPACITY, args, bin_dir)
+    assert result.returncode != 0
+    assert not [c for c in calls(bin_dir) if "update-auto-scaling-group" in c or "put-scheduled" in c]
+
+
+def test_class_capacity_status_reads_only(tmp_path: Path) -> None:
+    bin_dir = capacity_bin(tmp_path)
+    result = run_script(CAPACITY, ["status"], bin_dir)
+    assert result.returncode == 0, result.stderr
+    changing = [c for c in calls(bin_dir) if re.search(r"update-|put-|delete-|set-desired", c)]
+    assert changing == []
+    assert any("describe-target-health" in c for c in calls(bin_dir))
+    assert any("describe-scheduled-actions" in c for c in calls(bin_dir))

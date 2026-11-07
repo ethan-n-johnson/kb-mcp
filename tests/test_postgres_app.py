@@ -102,12 +102,12 @@ def test_mcp_tools_write_and_read_on_postgres(open_app: OpenApp) -> None:
     from tests.mcp_helpers import call, ok
 
     with open_app(models=False) as client:
-        created = ok(call(client, "upload", {"title": "From MCP", "content": "# From MCP\n\n" + "word " * 60}))
+        created = ok(call(client, "upload", {"title": "From MCP", "content": "# From MCP\n\n" + "word " * 60}, token=True))
         assert created["status"] == "created"
         got = ok(call(client, "get", {"doc_id": created["doc_id"]}))
         assert got["title"] == "From MCP"
         audit = client.get("/api/audit").json()["entries"]
-    assert (audit[0]["token_name"], audit[0]["action"]) == ("mcp", "upload")
+    assert (audit[0]["token_name"], audit[0]["action"]) == ("test", "upload")
 
 
 def test_rest_write_lands_with_the_token_name(open_app: OpenApp) -> None:

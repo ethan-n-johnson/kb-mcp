@@ -33,11 +33,12 @@ Parameters:
     ConstraintDescription: A single email address.
   MetricsMode:
     Type: String
-    Default: api
+    Default: 'off'
     AllowedValues:
+      - 'off'
       - emf
       - api
-    Description: How the app publishes search metrics (KB_METRICS_MODE). api sends them with put_metric_data, which the instance role allows. emf writes Embedded Metric Format log lines, which only become metrics when the container logs reach CloudWatch Logs; the sandbox role cannot write there, so emf is only for an environment that adds that back (deviation 8).
+    Description: How the app publishes search metrics (KB_METRICS_MODE). off publishes nothing and starts no sender (the default, because the sandbox instance role cannot publish metrics, deviation 8, so the KbMcp alarms stay without data). api sends them with put_metric_data, which only works with an instance role that allows it. emf writes Embedded Metric Format log lines, which only become metrics when the container logs reach CloudWatch Logs; the sandbox role cannot write there, so emf is only for an environment that adds that back (deviation 8).
   ExtensionOrigin:
     Type: String
     Default: ''
@@ -55,10 +56,10 @@ Parameters:
 
   SearchRate:
     Type: String
-    Default: 30/minute
+    Default: 120/minute
     AllowedPattern: '^[0-9]+/(second|minute|hour|day)$'
-    ConstraintDescription: A rate such as 30/minute (a number, a slash and second, minute, hour or day).
-    Description: Search rate limit per client address (KB_SEARCH_RATE). It is counted per instance, so with several instances (postgres mode) the effective limit is this value times the instance count. Raise it for the phase 23 load test. infra/deploy.sh reads it from KB_SEARCH_RATE.
+    ConstraintDescription: A rate such as 120/minute (a number, a slash and second, minute, hour or day).
+    Description: Search rate limit per client address (KB_SEARCH_RATE), 120/minute by default so a class behind one campus NAT shares a workable budget. It is counted per instance, so with several instances (postgres mode) the effective limit is this value times the instance count. Admission control, not this limit, protects the instances from overload; raise it far above the default only for a load test. infra/deploy.sh reads it from KB_SEARCH_RATE.
 
 Conditions:
   UsePostgres: !Equals [!Ref DatabaseMode, postgres]
@@ -695,7 +696,7 @@ Resources:
               # Container logs stay on the instance with Docker's local driver,
               # rotated at 5 files of 10 MB (`docker logs kb` reads them). The sandbox
               # role cannot write to CloudWatch Logs (deviation 8, which replaces the
-              # CloudWatch Logs driver of deviation 3), so search metrics use MetricsMode=api.
+              # CloudWatch Logs driver of deviation 3), so search metrics default to MetricsMode=off.
               LOG_OPTS=(
                 --log-driver local
                 --log-opt max-size=10m

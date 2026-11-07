@@ -52,18 +52,18 @@ def search_status(client: TestClient, **kwargs: Any) -> int:
 # --- rate limit: REST ------------------------------------------------------------------------
 
 
-def test_default_rate_is_30_per_minute() -> None:
-    assert config.Settings().search_rate == "30/minute"
-    assert config.Settings.from_env({}).search_rate == "30/minute"
+def test_default_rate_is_120_per_minute() -> None:
+    assert config.Settings().search_rate == "120/minute"
+    assert config.Settings.from_env({}).search_rate == "120/minute"
     assert config.Settings.from_env({"KB_SEARCH_RATE": " 5/second "}).search_rate == "5/second"
 
 
-def test_the_31st_search_in_a_minute_gets_429(open_app: OpenApp) -> None:
-    with open_app() as client:
-        statuses = [search_status(client) for _ in range(31)]
+def test_the_121st_search_in_a_minute_gets_429(open_app: OpenApp) -> None:
+    with open_app(models=False) as client:
+        statuses = [search_status(client) for _ in range(121)]
         resp = client.get("/api/search", params=Q)
-    assert statuses[:30] == [200] * 30
-    assert statuses[30] == 429
+    assert statuses[:120] == [200] * 120
+    assert statuses[120] == 429
     assert resp.status_code == 429
     body = resp.json()
     assert body["error"] == "rate_limited" and body["detail"] == RATE_LIMIT_MESSAGE
@@ -694,11 +694,14 @@ def test_every_non_get_route_refuses_a_missing_or_wrong_token(open_app: OpenApp)
         assert {"/ui/add/paste", "/ui/admin/fallback"} <= {p for _, p in checked}
 
 
-def test_mcp_write_tools_need_no_token_but_rest_writes_still_do(open_app: OpenApp) -> None:
-    """MCP tools are open (claude.ai connectors cannot send a bearer token); REST is not."""
+def test_mcp_write_tools_need_a_token_over_http_and_reads_do_not(open_app: OpenApp) -> None:
+    """Writes need a bearer token on every interface; the MCP read tools stay open."""
     with open_app() as client:
-        result = call(client, "upload", {"title": "t", "content": "# t\n\nopen write"})
-        assert result["isError"] is False, result
+        refused = call(client, "upload", {"title": "t", "content": "# t\n\nclosed write"})
+        assert refused["isError"] is True and "needs a write token" in error_text(refused)
+        assert call(client, "upload", {"title": "t", "content": "# t\n\nclosed write"}, token=True)["isError"] is False
+        assert call(client, "list_tags")["isError"] is False
+        assert call(client, "stale")["isError"] is False
         for headers in ({}, {"Authorization": "Bearer wrong"}):
             resp = client.post("/api/docs", json={"title": "t", "content": "c"}, headers=headers)
             assert resp.status_code == 401
@@ -783,7 +786,9 @@ def test_logs_never_contain_the_authorization_header_or_a_token(open_app: OpenAp
         call(client, "upload", {"title": "n", "content": "# n\n\nbody text here."}, token=True)
         call(client, "delete", {"doc_id": doc_id}, headers=wrong)
         client.delete(f"/api/docs/{doc_id}", headers=token_line)
-    text = "\n".join(captured_logs.lines)
+    # The refusal sentence of a tokenless MCP write (which the SDK logs) names the header
+    # to send; it holds no secret.
+    text = "\n".join(captured_logs.lines).replace('--header \\"Authorization: Bearer <token>\\"', "")
     assert text, "nothing was logged"
     assert "unhandled error" in text  # the 500 path really was exercised
     for secret in ("testtoken", "wrongtoken", "cookie-secret-1", "Bearer", "authorization"):

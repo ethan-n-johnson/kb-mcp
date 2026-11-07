@@ -11,11 +11,13 @@ Errors a caller can act on (`ServiceError`, `IngestError`, bad arguments) become
 message. Anything else is a crash: the SDK logs it and the client sees only
 "Error executing tool <name>".
 
-No token is required: every tool, read or write, runs without one (so clients
-that cannot send a bearer header, such as claude.ai connectors, can use them).
-A token is still accepted only to name the actor in the audit log: over HTTP
-the request's `Authorization: Bearer` header, over stdio `KB_TOKEN`. A missing
-or unknown token is not an error; the actor is then `MCP_ACTOR`.
+Tokens (phase 24): the read tools (`search`, `get`, `list_tags`, `stale`, `gaps`)
+need no token. Over HTTP every write tool (`upload`, `upload_file`, `update`,
+`delete`, `merge`, `ingest_url`, `verify`) needs `Authorization: Bearer <write
+token>` and is refused before any work is done otherwise; a token store that
+cannot be read refuses too (fail closed). The token's name is the audit actor.
+Over stdio (a local, trusted process) writes stay tokenless: `KB_TOKEN`, if it
+matches a write token, names the actor, else the actor is `MCP_ACTOR`.
 """
 
 import logging
@@ -45,7 +47,12 @@ log = logging.getLogger(__name__)
 T = TypeVar("T")
 
 MCP_ACTOR = "mcp"
-"""Audit log actor for a tool call that carries no valid token."""
+"""Audit log actor for a stdio tool call that carries no valid `KB_TOKEN`."""
+
+WRITE_TOKEN_MESSAGE = (
+    'This tool needs a write token: add the server with --header "Authorization: Bearer <token>"'
+)
+"""Shown for every failed HTTP token check; it never says which part failed."""
 
 TOOL_NAMES = (
     "search",
@@ -64,7 +71,9 @@ TOOL_NAMES = (
 
 INSTRUCTIONS = (
     "Team knowledge base for the Cloud Computing course (AWS). Search it before answering "
-    "questions about our systems, AWS setup or runbooks. No token is needed."
+    "questions about our systems, AWS setup or runbooks. Reading needs no token; tools that "
+    "change the knowledge base (upload, upload_file, update, delete, merge, ingest_url, "
+    "verify) need a write token sent as an Authorization: Bearer header."
 )
 
 DESCRIPTIONS: dict[str, str] = {
@@ -154,7 +163,8 @@ def mcp_actor(ctx: Context, *, stdio: bool = False) -> str:
     Over HTTP a valid `Authorization: Bearer` token names the actor; over stdio
     (`stdio=True`, no request) `KB_TOKEN` does. Anything else, including a
     missing or wrong token or a token store that cannot be read, gives
-    `MCP_ACTOR`. An HTTP call never falls back to the environment.
+    `MCP_ACTOR`. An HTTP call never falls back to the environment. Write tools
+    over HTTP use `require_http_writer` instead, which refuses in those cases.
     """
     request = ctx.request_context.request
     secret: str | None
@@ -172,6 +182,26 @@ def mcp_actor(ctx: Context, *, stdio: bool = False) -> str:
         log.warning("write token lookup failed; recording the call as %s", MCP_ACTOR, exc_info=True)
         name = None
     return name or MCP_ACTOR
+
+
+def require_http_writer(ctx: Context) -> str:
+    """Return the name of the write token behind an HTTP tool call, or raise `ToolError`.
+
+    The secret is the request's `Authorization: Bearer` header. A call with no
+    request, a missing, wrong or malformed header, or a token store that cannot
+    be read all raise the same `WRITE_TOKEN_MESSAGE` (fail closed). Nothing
+    from the header is logged.
+    """
+    request = ctx.request_context.request
+    secret = bearer_secret(request.headers.get("authorization")) if request is not None else None
+    try:
+        name = check_token(secret)
+    except Exception:
+        log.warning("write token lookup failed; refusing the call", exc_info=True)
+        name = None
+    if name is None:
+        raise ToolError(WRITE_TOKEN_MESSAGE)
+    return name
 
 
 def _as_tool_error(exc: Exception) -> Exception:
@@ -196,7 +226,8 @@ def build_mcp(source: SearchStateSource, *, stdio: bool = False) -> MCPServer:
 
     `source` is the shared `SearchState`, or a function returning it: the HTTP
     app creates its state in the FastAPI lifespan, after the tools are built.
-    `stdio=True` makes write tools take the audit log name from `KB_TOKEN`.
+    `stdio=True` makes write tools take the audit log name from `KB_TOKEN` and
+    skips the HTTP write-token requirement.
     """
 
     def state() -> SearchState:
@@ -218,10 +249,14 @@ def build_mcp(source: SearchStateSource, *, stdio: bool = False) -> MCPServer:
             raise _as_tool_error(exc)
 
     async def call_write(ctx: Context, fn: Callable[[Store, str], T]) -> T:
-        """Run `fn(conn, actor)` in a worker thread; `actor` comes from `mcp_actor`."""
+        """Run `fn(conn, actor)` in a worker thread, after the token check.
+
+        Over HTTP `actor` is the write token's name and a missing or wrong token
+        is refused before anything else happens; over stdio it comes from `mcp_actor`.
+        """
 
         def work() -> T:
-            actor = mcp_actor(ctx, stdio=stdio)
+            actor = mcp_actor(ctx, stdio=True) if stdio else require_http_writer(ctx)
             conn = open_store(state().settings)
             try:
                 return fn(conn, actor)

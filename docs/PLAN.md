@@ -327,7 +327,7 @@ Demo script (about 15 minutes):
 5. Capture a page with the extension, then find it with search.
 6. Ask something outside the corpus, show `low` confidence, then show it in `gaps`.
 7. Flip the fallback toggle, repeat a search, and show `mode: keyword` still answering. In the AWS Academy sandbox the instance role cannot publish custom metrics (deviation 8), so the alarm email comes from the load balancer instead. About 20 minutes before the demo, mark the instance unhealthy (`aws autoscaling set-instance-health --instance-id <id> --health-status Unhealthy`): Auto Scaling replaces it (the old one flushes a last snapshot, the new one restores it), `HealthyHostCount` drops to 0 while the replacement boots, and `kb-no-healthy-host` sends its ALARM email, then the OK email. Show those two emails.
-8. Failover: terminate the instance in the EC2 console. The ALB marks it unhealthy, the Auto Scaling group launches a replacement (possibly in the other AZ), and the new instance mounts EFS. Search again: same documents, nothing lost. Start this early and talk through steps 9 and 10 while it recovers.
+8. Failover: terminate the instance in the EC2 console. The ALB marks it unhealthy, the Auto Scaling group launches a replacement (possibly in the other AZ), and the new instance gets the database back without any file system: in `sqlite` mode it restores the latest S3 snapshot at boot, in `postgres` mode it simply reads RDS (nothing to restore; any other instance keeps answering meanwhile). It never mounts EFS (blocked in the sandbox). Search again: same documents, nothing lost. Start this early and talk through steps 9 and 10 while it recovers.
 9. Run `stale`, then `verify` one doc.
 10. Close on the Well-Architected table and the scale-out path.
 

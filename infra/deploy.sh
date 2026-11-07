@@ -30,9 +30,11 @@
 #                                 default myS3Role (the only profile the Cloud
 #                                 Architecting sandbox lets you pass; Learner Lab
 #                                 has LabInstanceProfile)
-#   KB_METRICS_MODE               api (default) or emf, how the app publishes
-#                                 search metrics (see kb/metrics.py); emf needs an
-#                                 instance role that can write CloudWatch Logs
+#   KB_METRICS_MODE               off (default), api or emf, how the app publishes
+#                                 search metrics (see kb/metrics.py); off because the
+#                                 sandbox role cannot publish; api needs a role that
+#                                 allows put_metric_data, emf one that can write
+#                                 CloudWatch Logs
 #   KB_EXTENSION_ORIGIN           chrome-extension://<32 letter id>, the only origin
 #                                 CORS allows; unset or empty means no CORS headers
 #   KB_DATABASE_MODE              sqlite (default) or postgres, where the knowledge
@@ -41,7 +43,7 @@
 #                                 snapshot into an empty RDS database at boot);
 #                                 postgres also runs 2 to 4 instances
 #   KB_SEARCH_RATE                search rate limit per client address and per
-#                                 instance (default 30/minute), e.g. 600/minute for
+#                                 instance (default 120/minute), e.g. 6000/minute for
 #                                 a load test; passed only when set
 set -euo pipefail
 
@@ -148,7 +150,7 @@ case "$1" in
       "ImageTag=$2"
       "CloudFrontPrefixListId=$KB_CLOUDFRONT_PREFIX_LIST_ID"
       "AlertEmail=$KB_ALERT_EMAIL"
-      "MetricsMode=${KB_METRICS_MODE:-api}"
+      "MetricsMode=${KB_METRICS_MODE:-off}"
       "InstanceProfileName=${KB_INSTANCE_PROFILE:-myS3Role}"
       "ExtensionOrigin=${KB_EXTENSION_ORIGIN:-}"
       "DatabaseMode=${KB_DATABASE_MODE:-sqlite}"
