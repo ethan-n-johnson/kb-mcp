@@ -4,17 +4,12 @@ const $ = (id) => document.getElementById(id);
 const { el } = KB;
 let settings = { serverUrl: "", token: "" };
 let tab = null;
-let captured = null; // {html, url} from the last Capture, reused by Update existing
+let captured = null; // {html, url, frames} from the last Capture, reused by Update existing
+let allFrames = false; // the user allowed capturing embedded frames (settings)
 
-/** Runs inside the page (serialized by executeScript, so it must not use outer variables). */
-function grabPage(selectionOnly) {
-  const sel = getSelection();
-  if (selectionOnly && sel && sel.rangeCount && sel.toString().trim()) {
-    const box = document.createElement("div");
-    for (let i = 0; i < sel.rangeCount; i++) box.appendChild(sel.getRangeAt(i).cloneContents());
-    return { html: box.outerHTML, url: location.href };
-  }
-  return { html: document.documentElement.outerHTML, url: location.href };
+/** Runs inside the page: frames, embeds and objects in the top document. */
+function countFrames() {
+  return document.querySelectorAll("iframe, frame, embed, object").length;
 }
 
 function show(kind, ...nodes) {
@@ -42,7 +37,8 @@ function showUpload(res) {
   const d = res.data;
   if (res.status === 201 && d.status === "created") {
     const note = d.near_duplicate_check ? " (near-duplicate check skipped)" : "";
-    show("ok", "Saved: ", docLink(d.doc_id, `doc ${d.doc_id}`), ` with ${d.chunks} chunks.${note}`);
+    const from = captured.frames > 1 ? ` from ${captured.frames} frames` : "";
+    show("ok", "Saved: ", docLink(d.doc_id, `doc ${d.doc_id}`), ` with ${d.chunks} chunks${from}.${note}`);
   } else if (res.status === 409 && d.error === "duplicate") {
     show("warn", "Already saved as ", docLink(d.doc_id, `doc ${d.doc_id}`), ".");
   } else if (res.ok && d.status === "possible_duplicate") {
@@ -71,14 +67,21 @@ async function post(force) {
   const body = { content: captured.html, format: "html", tags, force };
   if (title) body.title = title;
   if (/^https?:\/\//.test(captured.url)) body.source_url = captured.url.split("#")[0];
-  showUpload(await KB.api(settings, "POST", "/api/docs", body));
+  const res = await KB.sendWithRetry(
+    () => KB.api(settings, "POST", "/api/docs", body),
+    (attempt, waitMs, reason) => show("note", `The server did not answer (${reason}); retry ${attempt} in ${waitMs / 1000} s...`),
+  );
+  if (res.savedEarlier) {
+    return show("ok", "Saved: ", docLink(res.data.doc_id, `doc ${res.data.doc_id}`), " (the first answer was lost on the way; a retry found it stored).");
+  }
+  showUpload(res);
 }
 
 async function updateExisting(docId) {
-  const res = await KB.api(settings, "PATCH", `/api/docs/${Number(docId)}`, {
-    content: captured.html,
-    format: "html",
-  });
+  const res = await KB.sendWithRetry(
+    () => KB.api(settings, "PATCH", `/api/docs/${Number(docId)}`, { content: captured.html, format: "html" }),
+    (attempt, waitMs, reason) => show("note", `The server did not answer (${reason}); retry ${attempt} in ${waitMs / 1000} s...`),
+  );
   if (res.ok && res.data.status === "updated") {
     show("ok", "Updated ", docLink(docId, `doc ${docId}`), ` (${res.data.chunks} chunks).`);
   } else if (res.ok && res.data.status === "unchanged") {
@@ -99,8 +102,11 @@ async function run(task) {
       await task();
     }
   } catch (err) {
-    const timeout = err && err.name === "TimeoutError";
-    show("error", timeout ? "The server took too long to answer." : "Could not reach the server. Check the URL in settings.");
+    if (err && err.name === "RetriesExhausted") {
+      show("error", err.message + " It may still have been stored: check the web UI before capturing again.");
+    } else {
+      show("error", "Could not reach the server. Check the URL in settings.");
+    }
   } finally {
     busy(false);
   }
@@ -108,12 +114,19 @@ async function run(task) {
 
 async function capture() {
   const selectionOnly = !$("sel-row").hidden && $("sel").checked;
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
+  const grab = (all) => chrome.scripting.executeScript({
+    target: { tabId: tab.id, allFrames: all },
     func: grabPage,
-    args: [selectionOnly],
+    args: [{ selectionOnly }],
   });
-  captured = result;
+  let results;
+  try {
+    results = await grab(allFrames);
+  } catch (err) {
+    if (!allFrames) throw err;
+    results = await grab(false); // a frame Chrome refused should not cost the whole page
+  }
+  captured = combineFrames(results, selectionOnly, $("title").value.trim());
   await post(false);
 }
 
@@ -130,16 +143,46 @@ async function init() {
   $("form").hidden = false;
   [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   $("title").value = (tab && tab.title) || "";
+  showCanvasLink(tab);
+  allFrames = await KB.hasFrameAccess();
   try {
-    const [{ result }] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
+    const sels = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, allFrames },
       func: () => (getSelection() ? getSelection().toString().trim().length : 0),
     });
-    $("sel-row").hidden = !(result > 0);
+    $("sel-row").hidden = !sels.some((r) => r.result > 0);
+    if (!allFrames) {
+      const [{ result: n }] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: countFrames,
+      });
+      if (n > 0) {
+        show("note", `This page has ${n} embedded frame${n > 1 ? "s" : ""} that will not be captured. ` +
+          "Tick \"Capture embedded frames\" in settings to include them.");
+      }
+    }
   } catch {
     $("capture").disabled = true;
     show("warn", "This page cannot be captured (browser pages and the Web Store are blocked).");
   }
+}
+
+/** On a Canvas course page, offer the modules mode (it opens in its own tab). */
+function showCanvasLink(current) {
+  let url;
+  try {
+    url = new URL(current.url);
+  } catch {
+    return;
+  }
+  const m = url.protocol === "https:" && url.pathname.match(/^\/courses\/(\d+)(\/|$)/);
+  if (!m) return;
+  $("canvas-row").hidden = false;
+  $("canvas").addEventListener("click", () => {
+    const q = new URLSearchParams({ tab: String(current.id), origin: url.origin, course: m[1] });
+    chrome.tabs.create({ url: chrome.runtime.getURL("modules.html?" + q) });
+    window.close();
+  });
 }
 
 $("form").addEventListener("submit", (e) => {

@@ -93,6 +93,9 @@ class SearchState:
     index: VectorIndex = field(default_factory=VectorIndex)
     clock: Callable[[], float] = time.monotonic
     monitored: bool = field(default=False, init=False, repr=False)
+    # A `kb.search.gap_worker.GapWorker` in server mode with KB_GAP_RESOLUTION=background;
+    # None means writes resolve gaps inline (stdio MCP, CLI, service-level tests).
+    gap_worker: object | None = field(default=None, init=False, repr=False)
     _toggle: bool = field(default=False, init=False, repr=False)
     _toggle_read_at: float | None = field(default=None, init=False, repr=False)
     _toggle_error_logged: bool = field(default=False, init=False, repr=False)

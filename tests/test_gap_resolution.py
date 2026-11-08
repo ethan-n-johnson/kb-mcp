@@ -261,3 +261,86 @@ def test_resolution_does_not_run_for_duplicates_or_possible_duplicates(open_app:
         assert post_doc(client, EBS).status_code == 409
         assert post_doc(client, EBS.replace("Windows", "Windows Server")).json()["status"] == "possible_duplicate"
     assert reranker.score_calls == []
+
+
+# --- background worker (KB_GAP_RESOLUTION=background, the server default) -----------
+
+
+def test_background_mode_resolves_the_gap_after_the_write_returns(open_app: OpenApp) -> None:
+    with open_app(KB_GAP_RESOLUTION="background") as client:
+        worker = client.app.state.search.gap_worker
+        assert worker is not None
+        search(client, LINUX_QUERY)
+        doc_id = upload(client, EBS, ["storage"])
+        worker.join()
+        assert resolved(client) == {LINUX_QUERY: doc_id}
+
+
+def test_background_upload_does_not_wait_for_gap_resolution(
+    open_app: OpenApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    release = threading.Event()
+    started = threading.Event()
+    real = resolve.resolve_gaps
+
+    def slow(conn: Any, state: Any, doc_id: int) -> int:
+        started.set()
+        assert release.wait(10)
+        return real(conn, state, doc_id)
+
+    monkeypatch.setattr(resolve, "resolve_gaps", slow)
+    with open_app(KB_GAP_RESOLUTION="background") as client:
+        search(client, LINUX_QUERY)
+        doc_id = upload(client, EBS)  # returns while the worker is still blocked
+        assert started.wait(5)
+        assert resolved(client) == {LINUX_QUERY: None}
+        release.set()
+        client.app.state.search.gap_worker.join()
+        assert resolved(client) == {LINUX_QUERY: doc_id}
+
+
+def test_a_failing_background_resolution_is_logged_and_the_worker_goes_on(
+    open_app: OpenApp, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    real = resolve.resolve_gaps
+    calls: list[int] = []
+
+    def flaky(conn: Any, state: Any, doc_id: int) -> int:
+        calls.append(doc_id)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        return real(conn, state, doc_id)
+
+    monkeypatch.setattr(resolve, "resolve_gaps", flaky)
+    with open_app(KB_GAP_RESOLUTION="background") as client:
+        worker = client.app.state.search.gap_worker
+        search(client, LINUX_QUERY)
+        with caplog.at_level(logging.ERROR):
+            upload(client, S3)
+            worker.join()
+        assert any(r.getMessage() == "gap resolution failed" for r in caplog.records)
+        doc_id = upload(client, EBS)
+        worker.join()
+        assert resolved(client) == {LINUX_QUERY: doc_id}
+
+
+def test_passages_are_cut_to_rerank_max_chars_for_resolution(open_app: OpenApp) -> None:
+    reranker = FakeReranker()
+    long_doc = "# Long\n\n" + ("Linux instances store data on EBS volumes. " * 200)
+    with open_app(reranker=reranker, KB_RERANK_MAX_CHARS=300) as client:
+        search(client, LINUX_QUERY)
+        reranker.score_calls.clear()
+        upload(client, long_doc)
+    assert reranker.score_calls, "resolution should have reranked the open question"
+    assert all(len(t) <= 300 for _, texts in reranker.score_calls for t in texts)
+
+
+def test_gap_resolution_setting_is_validated() -> None:
+    from kb.config import Settings
+
+    assert Settings.from_env({}).gap_resolution == "background"
+    assert Settings.from_env({"KB_GAP_RESOLUTION": "Inline"}).gap_resolution == "inline"
+    with pytest.raises(ValueError, match="KB_GAP_RESOLUTION"):
+        Settings.from_env({"KB_GAP_RESOLUTION": "later"})
