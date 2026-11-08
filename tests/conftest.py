@@ -134,6 +134,7 @@ def client(
     monkeypatch.setenv("KB_DB", str(db_path))
     monkeypatch.setenv("KB_MODELS", "off")
     monkeypatch.setenv("KB_WRITE_TOKENS", "test:testtoken")
+    monkeypatch.setenv("KB_GAP_RESOLUTION", "inline")
     monkeypatch.delenv("KB_BUCKET", raising=False)
     config.clear_token_cache()
     from kb.main import create_app
@@ -215,6 +216,9 @@ def open_app(db_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch) -> Op
         # defaults in kb/config.py are tuned for the real models (phase 11).
         monkeypatch.setenv("KB_CONF_HIGH", "0.70")
         monkeypatch.setenv("KB_CONF_LOW", "0.30")
+        # Gap resolution runs inline so a test sees it when the write returns; the
+        # background worker has its own tests (pass KB_GAP_RESOLUTION=background).
+        monkeypatch.setenv("KB_GAP_RESOLUTION", "inline")
         for name, value in env.items():
             monkeypatch.setenv(name, str(value))
         app = create_app(

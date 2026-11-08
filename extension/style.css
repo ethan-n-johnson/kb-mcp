@@ -86,3 +86,17 @@ footer { margin-top: 10px; font-size: 12px; text-align: right; }
 .candidates li { margin-bottom: 6px; }
 .candidates button { margin-left: 4px; padding: 2px 8px; font-size: 12px; }
 #result > button { margin-top: 4px; }
+
+/* Canvas modules page */
+body.modules main { max-width: 900px; padding: 16px; }
+#tree { margin: 10px 0; }
+#tree details { border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; margin: 6px 0; }
+#tree summary { cursor: pointer; }
+#tree summary label { display: inline-flex; margin: 0; font-weight: 600; }
+#tree ul.items { list-style: none; margin: 6px 0 2px; padding-left: 22px; }
+#tree ul.items label { margin: 2px 0; }
+#log { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 13px; }
+#log th, #log td { border-bottom: 1px solid var(--border); padding: 4px 6px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+#log td:nth-child(2) { white-space: nowrap; }
+#log a { color: var(--accent); }
+section[hidden], table[hidden] { display: none; }

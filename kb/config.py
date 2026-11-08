@@ -43,6 +43,7 @@ class Settings:
     semantic_concurrency: int = 2
     rerank_candidates: int = 15
     rerank_max_chars: int = 1000
+    gap_resolution: str = "background"
     public_url: str | None = None
     extension_origin: str | None = None
     search_rate: str = "30/minute"
@@ -89,6 +90,9 @@ class Settings:
             semantic_concurrency = 0
         if semantic_concurrency < 1:
             raise ValueError("KB_SEMANTIC_CONCURRENCY must be an integer of at least 1")
+        gap_resolution = (e.get("KB_GAP_RESOLUTION") or cls.gap_resolution).strip().lower()
+        if gap_resolution not in ("background", "inline"):
+            raise ValueError("KB_GAP_RESOLUTION must be background or inline")
         tokens_source = (e.get("KB_TOKENS_SOURCE") or cls.tokens_source).strip().lower()
         if tokens_source not in ("ssm", "s3"):
             raise ValueError("KB_TOKENS_SOURCE must be ssm or s3")
@@ -124,6 +128,7 @@ class Settings:
             semantic_concurrency=semantic_concurrency,
             rerank_candidates=rerank_candidates,
             rerank_max_chars=rerank_max_chars,
+            gap_resolution=gap_resolution,
             public_url=(e.get("KB_PUBLIC_URL") or "").strip().rstrip("/") or None,
             extension_origin=e.get("KB_EXTENSION_ORIGIN") or None,
             search_rate=(e.get("KB_SEARCH_RATE") or cls.search_rate).strip(),

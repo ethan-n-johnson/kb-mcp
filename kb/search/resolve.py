@@ -9,6 +9,8 @@ result of the write is decided and never lets it raise.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -21,6 +23,7 @@ from kb.store import Store
 log = logging.getLogger(__name__)
 
 MAX_QUERIES = 50
+QUESTION_PAUSE_SECONDS = 0.2
 
 
 def _open_questions(conn: Store, limit: int) -> list[Any]:
@@ -64,7 +67,13 @@ def resolve_gaps(conn: Store, state: SearchState | None, doc_id: int) -> int:
     ).fetchall()
     if not rows:
         return 0
-    texts = [passage_text(r["title"], r["heading_path"], r["text"]) for r in rows]
+    # Cut like the search does (KB_RERANK_MAX_CHARS): the cross-encoder's cost grows
+    # with passage length, and a long PDF has many chunks.
+    limit = settings.rerank_max_chars
+    texts = [passage_text(r["title"], r["heading_path"], r["text"])[:limit] for r in rows]
+    # On the background worker, pause between questions so searches and the health
+    # check get the CPU in between; inline (stdio, tests) there is no pause.
+    pause = QUESTION_PAUSE_SECONDS if threading.current_thread().name == "gap-resolution" else 0.0
     vectors = None
     if reranker is None:
         model = state.embedder.model_name
@@ -74,6 +83,8 @@ def resolve_gaps(conn: Store, state: SearchState | None, doc_id: int) -> int:
         vectors = np.stack([np.frombuffer(r["embedding"], dtype=np.float32) for r in usable])
     resolved: list[str] = []
     for question in questions:
+        if pause:
+            time.sleep(pause)
         if reranker is not None:
             best = float(np.max(reranker.score(question["query"], texts)))
             threshold = settings.conf_high

@@ -20,6 +20,15 @@
       <label for="token">Write token</label>
       <input id="token" type="password" required autocomplete="off" spellcheck="false">
       <p class="hint">Stored in this browser profile only (<code>chrome.storage.local</code>).</p>
+      <label class="check" for="frames">
+        <input id="frames" type="checkbox"> Capture embedded frames
+      </label>
+      <p class="hint">
+        Also send the content of frames inside the page, such as a course tool or document
+        viewer embedded in Canvas. Saving with this ticked asks Chrome for access to all
+        https sites, used only when you click Capture. Chrome's built-in PDF viewer still
+        cannot be read; download the PDF and upload the file instead.
+      </p>
       <div class="row">
         <button id="save" type="submit">Save</button>
         <button id="test" type="button">Test</button>

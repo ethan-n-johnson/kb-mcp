@@ -348,8 +348,14 @@ def _resolve_gaps_quietly(conn: Conn, search_state: SearchState | None, doc_id: 
     """Run automatic gap resolution for `doc_id`; any failure is logged, never raised.
 
     Called last, after the result of the write is decided, so it cannot change
-    what the caller is told. Gap bookkeeping is best effort.
+    what the caller is told. Gap bookkeeping is best effort. With a gap worker
+    (server mode, `KB_GAP_RESOLUTION=background`) the doc is only queued, so the
+    request does not wait for the reranker.
     """
+    worker = search_state.gap_worker if search_state is not None else None
+    if worker is not None:
+        worker.submit(doc_id)  # type: ignore[attr-defined]
+        return
     try:
         resolve.resolve_gaps(conn, search_state, doc_id)
     except Exception:
