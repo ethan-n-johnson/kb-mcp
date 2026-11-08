@@ -83,6 +83,7 @@ check_time() {
 show_status() {
   local tg
   echo "group $ASG"
+  # shellcheck disable=SC2016  # backticks are JMESPath literals, not shell
   aws autoscaling describe-auto-scaling-groups --region "$REGION" --auto-scaling-group-names "$ASG" \
     --query 'AutoScalingGroups[0].{Min:MinSize,Max:MaxSize,Desired:DesiredCapacity,InService:length(Instances[?LifecycleState==`InService`])}' \
     --output table
