@@ -33,6 +33,7 @@ from kb.security import (
     cors_origin,
 )
 from kb.search import indexing
+from kb.search.gap_worker import GapWorker
 from kb.search.state import EmbedderLike, RerankerLike
 from kb.ui import router as ui_router
 from kb.ui_common import STATIC_DIR
@@ -115,6 +116,10 @@ def create_app(
         try:
             app.state.search = indexing.build_state(settings, embedder, reranker)
             await indexing.start(app.state.search)
+            if settings.gap_resolution == "background":
+                gaps = GapWorker(settings, app.state.search)
+                gaps.start()
+                app.state.search.gap_worker = gaps
             if settings.dialect == "postgres" and settings.database_url:
                 # /healthz and the fallback toggle are served from this thread's
                 # own connection, never from the pool the searches use.
@@ -136,6 +141,9 @@ def create_app(
             async with mcp.session_manager.run():
                 yield
         finally:
+            gaps = getattr(app.state, "search", None) and app.state.search.gap_worker
+            if gaps is not None:
+                await run_in_threadpool(gaps.stop)
             if app.state.health is not None:
                 await run_in_threadpool(app.state.health.stop)
             if snapshots is not None:

@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "KB Capture",
-  "version": "0.1.0",
+  "version": "0.3.1",
   "description": "Send the current page, or just your selection, to your knowledge-base server.",
   "minimum_chrome_version": "105",
   "permissions": ["activeTab", "scripting", "storage"],
   "optional_host_permissions": [
     "https://*.cloudfront.net/*",
-    "http://localhost:8000/*"
+    "http://localhost:8000/*",
+    "https://*/*"
   ],
   "action": {
     "default_title": "Capture to KB",

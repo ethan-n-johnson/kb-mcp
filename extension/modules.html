@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KB Capture: Canvas modules</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="modules">
+  <main>
+    <h1>Capture Canvas modules</h1>
+    <p id="course" class="hint"></p>
+    <div id="status" role="status" aria-live="polite"></div>
+
+    <section id="access" hidden>
+      <p>
+        To read the course and open its tools, Chrome has to allow KB Capture on https
+        sites (the same access as "Capture embedded frames" in settings).
+      </p>
+      <button id="allow" type="button">Allow and load modules</button>
+    </section>
+
+    <form id="pick" hidden>
+      <p class="hint">
+        Tick modules or single items. External tools (such as the course readings) open
+        one at a time in a separate window, which is scrolled and captured, then reused for
+        the next one. Opening a tool counts as viewing it in Canvas. Items that look like
+        labs, quizzes or assessments start unticked, because opening them may start a lab
+        or an attempt.
+      </p>
+      <div class="row">
+        <button id="all" type="button">Tick all</button>
+        <button id="none" type="button">Untick all</button>
+      </div>
+      <div id="tree"></div>
+
+      <label for="tags">Tags for every doc (comma separated)</label>
+      <input id="tags" type="text" autocomplete="off">
+      <label class="check"><input id="module-tag" type="checkbox" checked> Also tag each doc with its module name</label>
+      <label class="check"><input id="follow" type="checkbox"> Also store the web pages linked from captured content</label>
+      <p class="hint">
+        PDFs and Canvas files found in pages and tools are always stored. With this ticked,
+        every other web link in them is sent to the server to fetch as well (at most 300
+        per run; pages that need a login fail and are listed).
+      </p>
+      <div class="row">
+        <button id="start" type="submit">Start</button>
+        <button id="stop" type="button" disabled>Stop</button>
+      </div>
+    </form>
+
+    <table id="log" hidden>
+      <thead><tr><th>Item</th><th>Kind</th><th>Result</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </main>
+  <script src="common.js"></script>
+  <script src="capture.js"></script>
+  <script src="modules.js"></script>
+</body>
+</html>
