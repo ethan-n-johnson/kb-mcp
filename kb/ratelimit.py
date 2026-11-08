@@ -3,10 +3,14 @@
 One bucket per client address covers `GET /api/search`, the UI search pages
 (`/` with `?q=` and `/ui/search`) and the MCP `search` tool, so a caller cannot
 triple the budget by switching interface. The limit is `KB_SEARCH_RATE`
-(default `30/minute`). The engine is slowapi's `Limiter` (the `limits` library
+(default `120/minute`). The engine is slowapi's `Limiter` (the `limits` library
 with in-memory storage and a moving window); the decorator API is not used
 because the MCP tool has no route to decorate. The state lives in this
-process, which is correct because the service runs exactly one worker.
+process, which is correct because the service runs exactly one worker. It is
+per instance, so with 2 to 4 instances the effective limit is `KB_SEARCH_RATE`
+times the instance count. Overload protection is admission control (phase 23a);
+this limit only shares capacity fairly, so one client address (or one campus
+network behind a single NAT) cannot take every semantic slot.
 
 Stdio MCP has no request, so it is never limited.
 """

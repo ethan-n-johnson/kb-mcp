@@ -64,7 +64,8 @@ Phase 1 (00 to 16, plus the upload links) is the working single-instance prototy
 | 21 | [Search on pgvector and tsvector](21-pgvector-search.md) | Fri Nov 6 to Sat Nov 7 | local, then AWS | 20 | | |
 | 22 | [Stateless app and scale-out](22-stateless-scale-out.md) | Sun Nov 8 to Mon Nov 9 | local, then AWS | 21 | screenshots | |
 | 23 | [Load test and scaling evidence](23-load-test.md) | Tue Nov 10 | laptop + AWS | 22 | run Locust, screenshots | 2nd: a short curl loop instead of Locust |
-| 24 | [Final README, extension, submission](24-final-wrap.md) | Wed Nov 11 to Thu Nov 12 | local + AWS | 23 | extension, rehearsal, video | 1st: extension; 3rd: full DEMO.md |
+| 23a | [Health check and admission control under load](23a-health-under-load.md) | done Nov 6 | laptop + AWS | 23 | run Locust | |
+| 24 | [Final README, extension, submission](24-final-wrap.md) | Wed Nov 11 to Thu Nov 12 | local + AWS | 23, 23a | extension, run3 Locust (50 users), MCP write decision, rehearsal, video | 1st: extension; 3rd: full DEMO.md |
 
 Replanned Nov 6: 19 and 20 finished early (Oct 29), then a week passed, so there is no buffer day left. Submit Fri Nov 13. Phase 18 (the Lambda) is dropped: EventBridge is not on the sandbox list.
 

@@ -22,7 +22,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from kb import config, db
 from kb.main import create_app
-from kb.mcp_tools import MCP_ACTOR, TOOL_NAMES
+from kb.mcp_tools import MCP_ACTOR, TOOL_NAMES, WRITE_TOKEN_MESSAGE
 from tests.corpus import EBS, S3
 from tests.fakes import FakeEmbedder, FakeReranker
 
@@ -86,19 +86,42 @@ def test_sdk_client_lists_tools_and_searches(live_server: str, path: str, mode: 
     assert found.structured_content["results"][0]["doc_id"] == saved.structured_content["doc_id"]
 
 
-def test_sdk_client_without_a_token_can_read_and_write(live_server: str) -> None:
+def test_sdk_client_without_a_token_can_read_but_not_write(live_server: str) -> None:
     async def work() -> tuple[Any, Any, Any]:
         async with sdk_client(live_server + "/mcp") as client:
             listed = await client.call_tool("list_tags", {})
-            saved = await client.call_tool("upload", {"title": "Open", "content": S3})
-            got = await client.call_tool("get", {"doc_id": saved.structured_content["doc_id"]})
-            return listed, saved, got
+            refused = await client.call_tool("upload", {"title": "Open", "content": S3})
+            found = await client.call_tool("search", {"query": "s3"})
+            return listed, refused, found
 
-    listed, saved, got = run(work())
+    listed, refused, found = run(work())
     assert not listed.is_error and listed.structured_content == {"tags": []}
+    assert not found.is_error
+    assert refused.is_error
+    assert WRITE_TOKEN_MESSAGE in refused.content[0].text
+    conn = db.connect(config.get_settings().db_path)
+    try:
+        assert conn.execute("SELECT count(*) FROM docs").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_sdk_client_with_a_token_can_write_and_the_audit_names_it(live_server: str) -> None:
+    async def work() -> tuple[Any, Any]:
+        async with sdk_client(live_server + "/mcp", "testtoken") as client:
+            saved = await client.call_tool("upload", {"title": "Mine", "content": S3})
+            got = await client.call_tool("get", {"doc_id": saved.structured_content["doc_id"]})
+            return saved, got
+
+    saved, got = run(work())
     assert not saved.is_error and saved.structured_content["status"] == "created"
-    assert got.structured_content["title"] == "Open"
-    assert MCP_ACTOR == "mcp"
+    assert got.structured_content["title"] == "Mine"
+    conn = db.connect(config.get_settings().db_path)
+    try:
+        assert conn.execute("SELECT token_name FROM audit_log WHERE action = 'upload'").fetchone()[0] == "test"
+    finally:
+        conn.close()
+    assert MCP_ACTOR == "mcp"  # the actor of a stdio call without a token
 
 
 def test_curl_style_post_to_the_bare_path_is_not_redirected(live_server: str) -> None:

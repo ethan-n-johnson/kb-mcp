@@ -65,6 +65,12 @@ def test_default_mode_is_emf_and_unset_or_empty_means_emf(monkeypatch: pytest.Mo
     assert metrics_mode() == "api"
 
 
+def test_off_is_accepted_in_any_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    for raw in ("off", " OFF "):
+        monkeypatch.setenv(metrics.MODE_ENV, raw)
+        assert metrics_mode() == "off"
+
+
 def test_unknown_mode_falls_back_to_emf_with_one_warning(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -79,6 +85,27 @@ def test_emf_mode_writes_an_emf_line_and_never_touches_the_sender() -> None:
     line = emf_line("keyword")
     assert "_aws" in line and line["Mode"] == "keyword" and line["KeywordSearches"] == 1
     assert metrics._sender is None
+
+
+def test_off_mode_logs_a_plain_line_and_never_creates_a_sender(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv(metrics.MODE_ENV, "off")
+    threads_before = {t.name for t in threading.enumerate()}
+
+    def no_sender() -> Any:
+        raise AssertionError("off mode must not create a sender")
+
+    monkeypatch.setattr(metrics, "get_sender", no_sender)
+    monkeypatch.setattr(metrics, "ApiMetricsSender", no_sender)
+    with caplog.at_level(logging.WARNING):
+        line = emf_line("keyword")
+    assert "_aws" not in line
+    assert line["msg"] == "search metrics" and line["Mode"] == "keyword"
+    assert line["LatencyMs"] == 12.0 and line["ConfidenceLevel"] == 2 and line["KeywordSearches"] == 1
+    assert metrics._sender is None
+    assert "kb-metrics" not in {t.name for t in threading.enumerate()} - threads_before
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_api_mode_logs_no_emf_block_and_buffers_a_sample(monkeypatch: pytest.MonkeyPatch) -> None:

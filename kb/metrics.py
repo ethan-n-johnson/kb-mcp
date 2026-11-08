@@ -1,8 +1,13 @@
-"""Search metrics for CloudWatch: Embedded Metric Format lines, or `put_metric_data`.
+"""Search metrics for CloudWatch: Embedded Metric Format lines, `put_metric_data`, or none.
 
 `KB_METRICS_MODE` picks how one search becomes metrics:
 
-- `emf` (default): log one EMF line per search. The container's `awslogs` log
+- `off` (the stack default since phase 24): no metrics at all. The search still
+  logs a plain "search metrics" line with the same fields (no `_aws` block), and
+  no sender object, thread or boto3 client is ever created. Use it where the
+  instance role cannot publish metrics (the AWS Academy sandbox, deviation 8),
+  where `api` would only log a warning every 30 seconds.
+- `emf` (default when the variable is unset): log one EMF line per search. The container's `awslogs` log
   driver ships it (with `awslogs-format=json/emf`) and CloudWatch Logs extracts
   the metrics from the `_aws` block.
 - `api`: no EMF block; the sample goes into a buffer that a background thread
@@ -10,7 +15,7 @@
   EMF extraction does not work (phase 15, task 3). Flip it by setting the
   variable on the container; no code change.
 
-Both modes publish the same names under the same dimensions, so the alarms in
+`emf` and `api` publish the same names under the same dimensions, so the alarms in
 `infra/app.yaml` do not care which one is active. Namespace `KbMcp`, dimension
 `Mode` (`semantic` or `keyword`), metrics `LatencyMs`, `ConfidenceLevel` and
 `KeywordSearches`.
@@ -43,13 +48,13 @@ _warned_mode = False
 
 
 def metrics_mode() -> str:
-    """Return `emf` or `api` from `KB_METRICS_MODE` (default and fallback: `emf`).
+    """Return `emf`, `api` or `off` from `KB_METRICS_MODE` (default and fallback: `emf`).
 
     An unknown value logs one warning and means `emf`.
     """
     global _warned_mode
     raw = (os.environ.get(MODE_ENV) or "emf").strip().lower()
-    if raw in ("emf", "api"):
+    if raw in ("emf", "api", "off"):
         return raw
     if not _warned_mode:
         _warned_mode = True
@@ -217,7 +222,8 @@ def emit_search_metrics(mode: str, confidence: str, latency_ms: float) -> None:
     `ConfidenceLevel` (high=2, medium=1, low=0) and `KeywordSearches`
     (1 for a keyword search, else 0). With `KB_METRICS_MODE=emf` (default) this
     logs one EMF line; with `api` it buffers a sample for `put_metric_data` and
-    logs a plain line (no `_aws` block, so nothing is counted twice).
+    logs a plain line (no `_aws` block, so nothing is counted twice); with `off`
+    it only logs the plain line and never creates the sender.
     """
     try:
         level = CONFIDENCE_LEVELS.get(confidence, 0)
@@ -227,7 +233,11 @@ def emit_search_metrics(mode: str, confidence: str, latency_ms: float) -> None:
             "ConfidenceLevel": level,
             "KeywordSearches": 1 if mode == "keyword" else 0,
         }
-        if metrics_mode() == "api":
+        mode_setting = metrics_mode()
+        if mode_setting == "off":
+            log.info("search metrics", extra=fields)
+            return
+        if mode_setting == "api":
             get_sender().submit(
                 Sample(
                     timestamp=time.time(),

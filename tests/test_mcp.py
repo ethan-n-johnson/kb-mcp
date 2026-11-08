@@ -1,4 +1,4 @@
-"""MCP tools over HTTP at `/mcp`: stateless JSON-RPC, no redirects, no token needed.
+"""MCP tools over HTTP at `/mcp`: stateless JSON-RPC, no redirects, writes need a token.
 
 Requests go straight to the mounted route with raw JSON-RPC (the way the
 acceptance `curl` does), so nothing depends on a client library. The SDK
@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from kb import service
 from kb.ingest.fetch import FetchResult
-from kb.mcp_tools import MCP_ACTOR, TOOL_NAMES, build_mcp, mcp_actor
+from kb.mcp_tools import MCP_ACTOR, TOOL_NAMES, WRITE_TOKEN_MESSAGE, build_mcp, mcp_actor, require_http_writer
 from tests.conftest import OpenApp
 from tests.corpus import EBS, S3
 from tests.helpers import load_corpus, upload
@@ -29,7 +29,7 @@ PLAN = Path(__file__).parent.parent / "docs" / "PLAN.md"
 WRITE_TOOLS = ["upload", "upload_file", "update", "delete", "merge", "ingest_url", "verify"]
 READ_TOOLS = ["search", "get", "list_tags", "stale", "gaps"]
 
-# One call per write tool, used to show that none of them needs a token.
+# One call per write tool, used to show that every one of them needs a token over HTTP.
 WRITE_CALLS: dict[str, dict[str, Any]] = {
     "upload": {"title": "Note", "content": "# Note\n\nsome text that is long enough to chunk"},
     "upload_file": {"filename": "guide.pdf"},
@@ -268,7 +268,7 @@ def test_missing_required_arguments_are_an_error_result(open_app: OpenApp) -> No
     assert "query" in error_text(result)
 
 
-# --- write tools: no token needed ---------------------------------------------------------
+# --- write tools: a write token is needed over HTTP ----------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -282,19 +282,80 @@ def test_missing_required_arguments_are_an_error_result(open_app: OpenApp) -> No
     ],
     ids=["missing", "wrong", "wrong-scheme", "empty", "no-scheme"],
 )
-def test_write_tools_run_without_a_valid_token_and_audit_as_mcp(
+def test_write_tools_are_refused_without_a_valid_token_and_write_nothing(
     open_app: OpenApp, headers: dict[str, str]
 ) -> None:
     with open_app() as client:
         first, second = upload(client, EBS), upload(client, S3)
+        docs_before = scalar(client, "SELECT count(*) FROM docs")
+        audit_before = scalar(client, "SELECT count(*) FROM audit_log")
+        results = {tool: call(client, tool, WRITE_CALLS[tool], headers=headers) for tool in WRITE_TOOLS}
+        docs_after = scalar(client, "SELECT count(*) FROM docs")
+        audit_after = scalar(client, "SELECT count(*) FROM audit_log")
+        doc = client.get(f"/api/docs/{first}").json()
+    assert first == 1 and second == 2
+    for tool in WRITE_TOOLS:
+        assert results[tool]["isError"] is True, (tool, results[tool])
+        text = error_text(results[tool])
+        assert text.endswith(WRITE_TOKEN_MESSAGE), (tool, text)
+        assert "Authorization: Bearer" in text
+    assert (docs_after, audit_after) == (docs_before, audit_before)  # nothing written, nothing audited
+    assert doc["title"] == "Amazon EBS volumes"  # the update and delete did not run
+
+
+def test_a_refused_upload_file_hands_out_no_link(open_app: OpenApp) -> None:
+    with open_app(models=False) as client:
+        refused = call(client, "upload_file", {"filename": "guide.pdf"})
+    assert refused["isError"]
+    assert "curl" not in str(refused) and "/api/uploads/" not in str(refused)
+
+
+def test_every_write_tool_is_covered_by_the_token_gate() -> None:
+    """The tools that need a token are exactly TOOL_NAMES minus the five readers."""
+    assert sorted(WRITE_TOOLS + READ_TOOLS) == sorted(TOOL_NAMES)
+
+
+def test_write_tools_work_with_a_valid_token_and_audit_the_token_name(open_app: OpenApp) -> None:
+    with open_app() as client:
+        first, second = upload(client, EBS), upload(client, S3)
         order = ["upload", "upload_file", "update", "verify", "merge", "delete"]
-        results = {tool: call(client, tool, WRITE_CALLS[tool], headers=headers) for tool in order}
-        log = rows(client, "SELECT token_name, action FROM audit_log WHERE token_name = ? ORDER BY id", MCP_ACTOR)
+        results = {tool: call(client, tool, WRITE_CALLS[tool], token=True) for tool in order}
+        log = rows(client, "SELECT token_name, action FROM audit_log WHERE token_name = ? ORDER BY id", "test")
     assert first == 1 and second == 2
     for tool in order:
         assert results[tool]["isError"] is False, (tool, results[tool])
     actions = [r["action"] for r in log]
     assert {"upload", "update", "verify", "merge", "delete"} <= set(actions), actions
+
+
+def test_reads_work_without_a_token(open_app: OpenApp) -> None:
+    with open_app() as client:
+        ids = load_corpus(client)
+        found = ok(call(client, "search", {"query": "How do I attach an EBS volume to a Linux instance?"}))
+        doc = ok(call(client, "get", {"doc_id": ids["ebs"]}))
+        tags = ok(call(client, "list_tags"))
+        stale = ok(call(client, "stale", {"days": 90}))
+        gaps = ok(call(client, "gaps"))
+    assert found["results"] and doc["title"] and tags["tags"] and stale == {"docs": []} and "gaps" in gaps
+
+
+def test_an_unreadable_token_store_refuses_http_writes(
+    open_app: OpenApp, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from kb import config
+
+    def broken() -> dict[str, str]:
+        raise RuntimeError("s3 unreachable")
+
+    with open_app(models=False) as client:
+        monkeypatch.setattr(config, "load_write_tokens", broken)
+        with caplog.at_level("WARNING"):
+            result = call(client, "upload", WRITE_CALLS["upload"], headers={"authorization": "Bearer secret-xyz"})
+        count = scalar(client, "SELECT count(*) FROM docs")
+    assert result["isError"] and error_text(result).endswith(WRITE_TOKEN_MESSAGE)
+    assert count == 0
+    assert "write token lookup failed" in caplog.text
+    assert "secret-xyz" not in caplog.text
 
 
 def test_the_token_is_never_logged(open_app: OpenApp, caplog: pytest.LogCaptureFixture) -> None:
@@ -481,6 +542,17 @@ def test_an_unreadable_token_store_still_lets_the_call_through(monkeypatch: pyte
 
     monkeypatch.setattr(config, "load_write_tokens", broken)
     assert mcp_actor(_ctx({"authorization": "Bearer anything"})) == MCP_ACTOR
+
+
+def test_http_writer_needs_a_valid_token(tokens: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    assert require_http_writer(_ctx({"authorization": "Bearer testtoken"})) == "test"
+    assert require_http_writer(_ctx({"authorization": "bearer demotoken"})) == "demo"
+    monkeypatch.setenv("KB_TOKEN", "testtoken")  # the environment is never used over HTTP
+    for ctx in (_ctx(None), _ctx({}), _ctx({"authorization": "Bearer nope"}), _ctx({"authorization": "Token testtoken"})):
+        with pytest.raises(ToolError, match="needs a write token"):
+            require_http_writer(ctx)
 
 
 def test_build_mcp_accepts_a_state_or_a_function(svc: Any) -> None:
