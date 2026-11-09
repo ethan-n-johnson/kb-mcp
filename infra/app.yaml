@@ -63,6 +63,8 @@ Parameters:
 
 Conditions:
   UsePostgres: !Equals [!Ref DatabaseMode, postgres]
+  # KbMcp and CWAgent metrics need a role that may publish them (not myS3Role).
+  PublishesMetrics: !Not [!Equals [!Ref MetricsMode, 'off']]
 
 # Group size per DatabaseMode. A table (FindInMap) rather than Fn::If because
 # CloudFormation documents Ref and FindInMap, but not Fn::If, inside CreationPolicy.
@@ -303,6 +305,7 @@ Resources:
         - Key: Project
           Value: kb-mcp
 
+  # Runbook: docs/ALARMS.md. Only PublishesMetrics alarms need custom metrics.
   # Search metrics come from kb/metrics.py: namespace KbMcp, dimension Mode
   # (semantic or keyword), metrics LatencyMs, ConfidenceLevel, KeywordSearches.
   # tests/test_infra.py checks that the alarms below use exactly those names.
@@ -311,6 +314,7 @@ Resources:
   # fires and then recovers during the demo.
   KeywordModeAlarm:
     Type: AWS::CloudWatch::Alarm
+    Condition: PublishesMetrics
     Properties:
       AlarmName: kb-keyword-mode
       AlarmDescription: The app answered at least one search in keyword mode (models failed, timed out or the fallback toggle is on). Fires on purpose in demo step 7.
@@ -408,6 +412,7 @@ Resources:
   # budget is about; slow keyword answers show up in kb-keyword-mode.
   HighLatencyAlarm:
     Type: AWS::CloudWatch::Alarm
+    Condition: PublishesMetrics
     Properties:
       AlarmName: kb-high-latency
       AlarmDescription: The 90th percentile of semantic search latency is above 2000 ms over 5 minutes. No data (no searches) counts as fine.
@@ -431,6 +436,7 @@ Resources:
   # agent aggregates across instances, so the series survives a replacement.
   MemoryAlarm:
     Type: AWS::CloudWatch::Alarm
+    Condition: PublishesMetrics
     Properties:
       AlarmName: kb-memory
       AlarmDescription: Host memory use averaged above 85 percent for 10 minutes.
@@ -451,6 +457,189 @@ Resources:
       OKActions:
         - !Ref AlertTopic
 
+  # 5xx from the ALB itself (502, 503, 504); kb-5xx counts only target 5xx.
+  Elb5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: kb-elb-5xx
+      AlarmDescription: The load balancer itself answered 5 or more 5xx (502, 503, 504) in 5 minutes. Targets dropped connections, timed out, or none was healthy.
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_ELB_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt Alb.LoadBalancerFullName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # Seconds, published by the ALB. Searches wait at most KB_SEARCH_TIMEOUT (5 s).
+  ResponseTimeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: kb-response-time
+      AlarmDescription: The 90th percentile of target response time is above 6 seconds for 10 minutes (two 5 minute periods).
+      Namespace: AWS/ApplicationELB
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt Alb.LoadBalancerFullName
+      ExtendedStatistic: p90
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 6
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # Basic EC2 metric, averaged over the group (what target tracking also reads).
+  CpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: kb-cpu
+      AlarmDescription: Average instance CPU above 85 percent for 15 minutes. In postgres mode the group should be scaling out; at 4 instances it cannot.
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AppAsg
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: missing
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # Desired minus in service; a new instance needs 3 to 10 minutes to be healthy.
+  CapacityShortAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: kb-capacity-short
+      AlarmDescription: Fewer instances in service than desired for 15 minutes. Launches or health checks are failing.
+      Metrics:
+        - Id: desired
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/AutoScaling
+              MetricName: GroupDesiredCapacity
+              Dimensions:
+                - Name: AutoScalingGroupName
+                  Value: !Ref AppAsg
+            Period: 60
+            Stat: Maximum
+        - Id: inservice
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/AutoScaling
+              MetricName: GroupInServiceInstances
+              Dimensions:
+                - Name: AutoScalingGroupName
+                  Value: !Ref AppAsg
+            Period: 60
+            Stat: Minimum
+        - Id: shortfall
+          Label: Desired minus in service
+          Expression: desired - inservice
+          ReturnData: true
+      EvaluationPeriods: 15
+      DatapointsToAlarm: 15
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: missing
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # RDS publishes every minute, so missing data shows as INSUFFICIENT_DATA, not OK.
+  DbCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: UsePostgres
+    Properties:
+      AlarmName: kb-db-cpu
+      AlarmDescription: RDS CPU above 80 percent for 15 minutes. db.t3.micro is burstable; sustained load drains its CPU credits.
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !ImportValue kb-DbInstanceId
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: missing
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # db.t3.micro allows roughly 80 to 110; the app uses at most 6 per instance.
+  DbConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: UsePostgres
+    Properties:
+      AlarmName: kb-db-connections
+      AlarmDescription: More than 60 database connections for 10 minutes (the app needs about 6 per instance, at most 24).
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !ImportValue kb-DbInstanceId
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 60
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: missing
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  DbStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: UsePostgres
+    Properties:
+      AlarmName: kb-db-storage
+      AlarmDescription: Less than 2 GB of free database storage (of 20 GB) for 10 minutes.
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !ImportValue kb-DbInstanceId
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 2147483648
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: missing
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # kb-mcp: AWS metrics only. kb-mcp-db: RDS. kb-mcp-search: custom metrics.
   Dashboard:
     Type: AWS::CloudWatch::Dashboard
     Properties:
@@ -462,20 +651,21 @@ Resources:
               {
                 "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
                 "properties": {
-                  "title": "Search latency (p90, ms)", "region": "${AWS::Region}", "view": "timeSeries", "period": 60,
+                  "title": "Requests and 5xx per minute", "region": "${AWS::Region}", "view": "timeSeries", "period": 60,
                   "metrics": [
-                    ["KbMcp", "LatencyMs", "Mode", "semantic", {"stat": "p90", "label": "semantic"}],
-                    ["KbMcp", "LatencyMs", "Mode", "keyword", {"stat": "p90", "label": "keyword"}]
+                    ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${AlbName}", {"stat": "Sum", "label": "requests"}],
+                    ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", "${AlbName}", {"stat": "Sum", "label": "target 5xx"}],
+                    ["AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count", "LoadBalancer", "${AlbName}", {"stat": "Sum", "label": "load balancer 5xx"}]
                   ]
                 }
               },
               {
                 "type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
                 "properties": {
-                  "title": "Searches per minute by mode", "region": "${AWS::Region}", "view": "timeSeries", "period": 60,
+                  "title": "Target response time (seconds)", "region": "${AWS::Region}", "view": "timeSeries", "period": 60,
                   "metrics": [
-                    ["KbMcp", "LatencyMs", "Mode", "semantic", {"stat": "SampleCount", "label": "semantic"}],
-                    ["KbMcp", "LatencyMs", "Mode", "keyword", {"stat": "SampleCount", "label": "keyword"}]
+                    ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${AlbName}", {"stat": "p50", "label": "p50"}],
+                    ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${AlbName}", {"stat": "p90", "label": "p90"}]
                   ]
                 }
               },
@@ -492,9 +682,11 @@ Resources:
               {
                 "type": "metric", "x": 12, "y": 6, "width": 12, "height": 6,
                 "properties": {
-                  "title": "Memory used (percent)", "region": "${AWS::Region}", "view": "timeSeries", "period": 300,
+                  "title": "Instances and CPU", "region": "${AWS::Region}", "view": "timeSeries", "period": 60,
                   "metrics": [
-                    ["CWAgent", "mem_used_percent", "AutoScalingGroupName", "${AsgName}", {"stat": "Average"}]
+                    ["AWS/AutoScaling", "GroupDesiredCapacity", "AutoScalingGroupName", "${AsgName}", {"stat": "Maximum", "label": "desired"}],
+                    ["AWS/AutoScaling", "GroupInServiceInstances", "AutoScalingGroupName", "${AsgName}", {"stat": "Minimum", "label": "in service"}],
+                    ["AWS/EC2", "CPUUtilization", "AutoScalingGroupName", "${AsgName}", {"stat": "Average", "label": "CPU percent (average)", "yAxis": "right"}]
                   ]
                 }
               }
@@ -503,6 +695,80 @@ Resources:
         - TgName: !GetAtt TargetGroup.TargetGroupFullName
           AlbName: !GetAtt Alb.LoadBalancerFullName
           AsgName: !Ref AppAsg
+
+  DbDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Condition: UsePostgres
+    Properties:
+      DashboardName: kb-mcp-db
+      DashboardBody: !Sub
+        - |
+          {
+            "widgets": [
+              {
+                "type": "metric", "x": 0, "y": 0, "width": 8, "height": 6,
+                "properties": {
+                  "title": "RDS CPU (percent)", "region": "${AWS::Region}", "view": "timeSeries", "period": 60,
+                  "metrics": [["AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${DbId}", {"stat": "Average"}]]
+                }
+              },
+              {
+                "type": "metric", "x": 8, "y": 0, "width": 8, "height": 6,
+                "properties": {
+                  "title": "RDS connections", "region": "${AWS::Region}", "view": "timeSeries", "period": 60,
+                  "metrics": [["AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${DbId}", {"stat": "Maximum"}]]
+                }
+              },
+              {
+                "type": "metric", "x": 16, "y": 0, "width": 8, "height": 6,
+                "properties": {
+                  "title": "RDS free storage (bytes)", "region": "${AWS::Region}", "view": "timeSeries", "period": 300,
+                  "metrics": [["AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${DbId}", {"stat": "Minimum"}]]
+                }
+              }
+            ]
+          }
+        - DbId: !ImportValue kb-DbInstanceId
+
+  SearchDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Condition: PublishesMetrics
+    Properties:
+      DashboardName: kb-mcp-search
+      DashboardBody: !Sub
+        - |
+          {
+            "widgets": [
+              {
+                "type": "metric", "x": 0, "y": 0, "width": 8, "height": 6,
+                "properties": {
+                  "title": "Search latency (p90, ms)", "region": "${AWS::Region}", "view": "timeSeries", "period": 60,
+                  "metrics": [
+                    ["KbMcp", "LatencyMs", "Mode", "semantic", {"stat": "p90", "label": "semantic"}],
+                    ["KbMcp", "LatencyMs", "Mode", "keyword", {"stat": "p90", "label": "keyword"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric", "x": 8, "y": 0, "width": 8, "height": 6,
+                "properties": {
+                  "title": "Searches per minute by mode", "region": "${AWS::Region}", "view": "timeSeries", "period": 60,
+                  "metrics": [
+                    ["KbMcp", "LatencyMs", "Mode", "semantic", {"stat": "SampleCount", "label": "semantic"}],
+                    ["KbMcp", "LatencyMs", "Mode", "keyword", {"stat": "SampleCount", "label": "keyword"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric", "x": 16, "y": 0, "width": 8, "height": 6,
+                "properties": {
+                  "title": "Memory used (percent)", "region": "${AWS::Region}", "view": "timeSeries", "period": 300,
+                  "metrics": [["CWAgent", "mem_used_percent", "AutoScalingGroupName", "${AsgName}", {"stat": "Average"}]]
+                }
+              }
+            ]
+          }
+        - AsgName: !Ref AppAsg
 
   # ----------------------------------------------------------- Launch template
   LaunchTemplate:
@@ -807,12 +1073,12 @@ Resources:
       MinSize: !FindInMap [Capacity, !Ref DatabaseMode, Min]
       MaxSize: !FindInMap [Capacity, !Ref DatabaseMode, Max]
       DesiredCapacity: !FindInMap [Capacity, !Ref DatabaseMode, Desired]
-      MetricsCollection: !If
-        - UsePostgres
-        - - Granularity: 1Minute
-            Metrics:
-              - GroupInServiceInstances
-        - !Ref AWS::NoValue
+      # Group metrics are free at 1 minute; kb-capacity-short and kb-capacity-max read them.
+      MetricsCollection:
+        - Granularity: 1Minute
+          Metrics:
+            - GroupInServiceInstances
+            - GroupDesiredCapacity
       VPCZoneIdentifier:
         - !ImportValue kb-PrivateSubnetA
         - !ImportValue kb-PrivateSubnetB

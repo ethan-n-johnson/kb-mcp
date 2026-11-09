@@ -381,19 +381,38 @@ def alarms(resources: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return found
 
 
-SIX_ALARMS = {
-    "kb-keyword-mode",
+# Phase 25.6: alarms on metrics AWS publishes itself, so they get data with the sandbox role.
+AWS_METRIC_ALARMS = {
     "kb-unhealthy-host",
     "kb-no-healthy-host",
     "kb-5xx",
-    "kb-high-latency",
-    "kb-memory",
+    "kb-elb-5xx",
+    "kb-response-time",
+    "kb-capacity-short",
+    "kb-cpu",
 }
+POSTGRES_ALARMS = {"kb-capacity-max", "kb-db-cpu", "kb-db-connections", "kb-db-storage"}
+# Custom metrics (KbMcp, CWAgent): only when the instance role may publish them.
+CUSTOM_METRIC_ALARMS = {"kb-keyword-mode", "kb-high-latency", "kb-memory"}
 
 
-def test_exactly_the_six_alarms_exist_in_sqlite_mode_and_seven_in_postgres_mode(app: dict[str, Any]) -> None:
-    assert set(alarms(deployed(app, "sqlite"))) == SIX_ALARMS
-    assert set(alarms(deployed(app, "postgres"))) == SIX_ALARMS | {"kb-capacity-max"}
+@pytest.mark.parametrize("metrics_mode", ["off", "api", "emf"])
+def test_the_alarm_set_per_database_mode_and_metrics_mode(app: dict[str, Any], metrics_mode: str) -> None:
+    custom = CUSTOM_METRIC_ALARMS if metrics_mode != "off" else set()
+    assert set(alarms(deployed(app, "sqlite", metrics_mode))) == AWS_METRIC_ALARMS | custom
+    assert set(alarms(deployed(app, "postgres", metrics_mode))) == AWS_METRIC_ALARMS | POSTGRES_ALARMS | custom
+
+
+def test_with_the_default_metrics_mode_no_alarm_reads_a_custom_namespace(app: dict[str, Any]) -> None:
+    """The sandbox role cannot publish KbMcp or CWAgent metrics; such alarms would stay OK forever."""
+    assert app["Parameters"]["MetricsMode"]["Default"] == "off"
+    for mode in ("sqlite", "postgres"):
+        for name, alarm in alarms(deployed(app, mode)).items():
+            namespaces = {alarm.get("Namespace")} | {
+                m["MetricStat"]["Metric"]["Namespace"] for m in alarm.get("Metrics", []) if "MetricStat" in m
+            }
+            namespaces.discard(None)
+            assert namespaces and all(ns.startswith("AWS/") for ns in namespaces), (mode, name, namespaces)
 
 
 def test_every_alarm_notifies_the_topic_on_alarm_and_on_ok(resources: dict[str, Any]) -> None:
@@ -421,6 +440,20 @@ def test_alarm_thresholds_match_the_phase_file(resources: dict[str, Any]) -> Non
     assert shape(a["kb-5xx"]) == ("Sum", 300, 1, None, 5, gte, "notBreaching")
     assert shape(a["kb-memory"]) == ("Average", 300, 2, 2, 85, gt, "notBreaching")
     assert shape(a["kb-capacity-max"]) == ("Maximum", 60, 1, None, 4, gte, "notBreaching")
+    assert shape(a["kb-elb-5xx"]) == ("Sum", 300, 1, None, 5, gte, "notBreaching")
+    assert shape(a["kb-db-cpu"]) == ("Average", 300, 3, 3, 80, gt, "missing")
+    assert shape(a["kb-db-connections"]) == ("Maximum", 300, 2, 2, 60, gt, "missing")
+    assert shape(a["kb-db-storage"]) == ("Minimum", 300, 2, 2, 2 * 1024**3, lt, "missing")
+    response = a["kb-response-time"]
+    assert (response["ExtendedStatistic"], response["Period"], response["EvaluationPeriods"]) == ("p90", 300, 2)
+    assert (response["DatapointsToAlarm"], response["Threshold"], response["ComparisonOperator"]) == (2, 6, gt)
+    assert response["TreatMissingData"] == "notBreaching" and "Statistic" not in response
+    assert shape(a["kb-cpu"]) == ("Average", 300, 3, 3, 85, gt, "missing")
+    assert (a["kb-cpu"]["Namespace"], a["kb-cpu"]["MetricName"]) == ("AWS/EC2", "CPUUtilization")
+    assert dims(a["kb-cpu"]) == {"AutoScalingGroupName": {"Ref": "AppAsg"}}
+    short = a["kb-capacity-short"]
+    assert (short["EvaluationPeriods"], short["DatapointsToAlarm"], short["Threshold"]) == (15, 15, 1)
+    assert (short["ComparisonOperator"], short["TreatMissingData"]) == (gte, "missing")
     latency = a["kb-high-latency"]
     assert (latency["ExtendedStatistic"], latency["Period"], latency["EvaluationPeriods"]) == ("p90", 300, 1)
     assert (latency["Threshold"], latency["ComparisonOperator"], latency["TreatMissingData"]) == (2000, gt, "notBreaching")
@@ -436,6 +469,47 @@ def test_elb_alarms_use_the_stack_s_own_target_group_and_load_balancer(resources
         assert dims(a[name]) == {"TargetGroup": tg, "LoadBalancer": lb}
     assert a["kb-5xx"]["MetricName"] == "HTTPCode_Target_5XX_Count"
     assert dims(a["kb-5xx"]) == {"LoadBalancer": lb}
+    assert (a["kb-elb-5xx"]["Namespace"], a["kb-elb-5xx"]["MetricName"]) == ("AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count")
+    assert dims(a["kb-elb-5xx"]) == {"LoadBalancer": lb}
+    assert (a["kb-response-time"]["Namespace"], a["kb-response-time"]["MetricName"]) == (
+        "AWS/ApplicationELB", "TargetResponseTime",
+    )
+    assert dims(a["kb-response-time"]) == {"LoadBalancer": lb}
+
+
+def test_rds_alarms_read_the_kb_db_instance(resources: dict[str, Any]) -> None:
+    a = alarms(resources)
+    db_id = {"Fn::ImportValue": "kb-DbInstanceId"}
+    db_exports = {o["Export"]["Name"] for o in load("db.yaml")["Outputs"].values()}
+    assert "kb-DbInstanceId" in db_exports
+    for name, metric in (
+        ("kb-db-cpu", "CPUUtilization"), ("kb-db-connections", "DatabaseConnections"), ("kb-db-storage", "FreeStorageSpace"),
+    ):
+        assert (a[name]["Namespace"], a[name]["MetricName"]) == ("AWS/RDS", metric)
+        assert dims(a[name]) == {"DBInstanceIdentifier": db_id}
+    for logical, res in resources.items():
+        if "ImportValue" in json.dumps(res) and "kb-DbInstanceId" in json.dumps(res):
+            assert res.get("Condition") == "UsePostgres", logical
+
+
+def test_capacity_short_alarm_is_desired_minus_in_service(resources: dict[str, Any]) -> None:
+    metrics_ = {m["Id"]: m for m in alarms(resources)["kb-capacity-short"]["Metrics"]}
+    assert metrics_["shortfall"]["Expression"] == "desired - inservice" and metrics_["shortfall"]["ReturnData"] is True
+    for metric_id, name in (("desired", "GroupDesiredCapacity"), ("inservice", "GroupInServiceInstances")):
+        stat = metrics_[metric_id]["MetricStat"]
+        assert metrics_[metric_id]["ReturnData"] is False
+        assert (stat["Metric"]["Namespace"], stat["Metric"]["MetricName"]) == ("AWS/AutoScaling", name)
+        assert stat["Metric"]["Dimensions"] == [{"Name": "AutoScalingGroupName", "Value": {"Ref": "AppAsg"}}]
+        assert stat["Period"] == 60
+    # Both metrics are collected, or the alarm would never get data.
+    collected = resources["AppAsg"]["Properties"]["MetricsCollection"][0]["Metrics"]
+    assert {"GroupDesiredCapacity", "GroupInServiceInstances"} <= set(collected)
+
+
+def test_every_template_fits_the_inline_template_size_limit() -> None:
+    """validate-template --template-body and deploy --template-file without --s3-bucket stop at 51,200 bytes."""
+    for path in INFRA.glob("*.yaml"):
+        assert path.stat().st_size < 51_200 - 1_024, (path.name, path.stat().st_size)
 
 
 def emitted_metrics() -> tuple[str, set[str], list[list[str]]]:
@@ -498,17 +572,31 @@ def test_alarms_that_the_demo_triggers_say_so(resources: dict[str, Any]) -> None
         assert "on purpose" not in a[name]["AlarmDescription"], name
 
 
-def test_dashboard_body_is_valid_json(resources: dict[str, Any]) -> None:
-    body, variables = resources["Dashboard"]["Properties"]["DashboardBody"]["Fn::Sub"]
+def dashboard_widgets(resource: dict[str, Any]) -> list[dict[str, Any]]:
+    body, variables = resource["Properties"]["DashboardBody"]["Fn::Sub"]
     text = body
     for name in variables:
         text = text.replace("${" + name + "}", f"value-{name}")
     text = text.replace("${AWS::Region}", "us-east-1")
     assert "${" not in text
-    widgets = json.loads(text)["widgets"]
-    assert len(widgets) == 4
-    metric_names = {m[1] for w in widgets for m in w["properties"]["metrics"]}
-    assert metric_names == {"LatencyMs", "HealthyHostCount", "UnHealthyHostCount", "mem_used_percent"}
+    return json.loads(text)["widgets"]
+
+
+def test_dashboards_are_valid_json_and_read_metrics_that_exist(resources: dict[str, Any]) -> None:
+    def names(logical: str) -> set[str]:
+        return {m[1] for w in dashboard_widgets(resources[logical]) for m in w["properties"]["metrics"]}
+
+    # The main dashboard reads only AWS-published metrics, so it has data with the sandbox role.
+    assert names("Dashboard") == {
+        "RequestCount", "HTTPCode_Target_5XX_Count", "HTTPCode_ELB_5XX_Count", "TargetResponseTime",
+        "HealthyHostCount", "UnHealthyHostCount", "GroupDesiredCapacity", "GroupInServiceInstances", "CPUUtilization",
+    }
+    namespaces = {m[0] for w in dashboard_widgets(resources["Dashboard"]) for m in w["properties"]["metrics"]}
+    assert namespaces == {"AWS/ApplicationELB", "AWS/AutoScaling", "AWS/EC2"}
+    assert resources["DbDashboard"]["Condition"] == "UsePostgres"
+    assert names("DbDashboard") == {"CPUUtilization", "DatabaseConnections", "FreeStorageSpace"}
+    assert resources["SearchDashboard"]["Condition"] == "PublishesMetrics"
+    assert names("SearchDashboard") == {"LatencyMs", "mem_used_percent"}
 
 
 # --- phase 12: S3 lifecycle ---------------------------------------------------------------
@@ -1392,12 +1480,15 @@ def resolve(node: Any, template: dict[str, Any], mode: str) -> Any:
     return out
 
 
-def deployed(app: dict[str, Any], mode: str) -> dict[str, Any]:
-    """The resources that exist in `mode` (conditions applied), with `DatabaseMode` resolved."""
-    kept = {
-        name: res for name, res in app["Resources"].items()
-        if res.get("Condition") in (None, "UsePostgres" if mode == "postgres" else None)
-    }
+def deployed(app: dict[str, Any], mode: str, metrics_mode: str = "off") -> dict[str, Any]:
+    """The resources that exist in `mode` and `metrics_mode` (conditions applied), with `DatabaseMode` resolved."""
+    true = {None}
+    if mode == "postgres":
+        true.add("UsePostgres")
+    if metrics_mode != "off":
+        true.add("PublishesMetrics")
+    assert set(app["Conditions"]) == {"UsePostgres", "PublishesMetrics"}
+    kept = {name: res for name, res in app["Resources"].items() if res.get("Condition") in true}
     return resolve(kept, app, mode)
 
 
@@ -1417,7 +1508,10 @@ def test_sqlite_mode_keeps_the_phase_1_group(app: dict[str, Any]) -> None:
         "min": 1, "max": 1, "desired": 1, "in_service": 0, "batch": 1, "wait": True, "signals": 1,
     }
     resources = deployed(app, "sqlite")
-    assert "MetricsCollection" not in resources["AppAsg"]["Properties"]
+    # Group metrics are collected in both modes (kb-capacity-short reads them).
+    assert resources["AppAsg"]["Properties"]["MetricsCollection"] == [
+        {"Granularity": "1Minute", "Metrics": ["GroupInServiceInstances", "GroupDesiredCapacity"]}
+    ]
     assert not of_type(resources, "AWS::AutoScaling::ScalingPolicy")
     assert "CapacityMaxAlarm" not in resources and "kb-capacity-max" not in alarms(resources)
 
@@ -1443,7 +1537,7 @@ def test_no_mode_can_exceed_four_instances(app: dict[str, Any]) -> None:
 def test_postgres_mode_collects_the_in_service_metric_for_the_capacity_alarm(app: dict[str, Any]) -> None:
     resources = deployed(app, "postgres")
     assert resources["AppAsg"]["Properties"]["MetricsCollection"] == [
-        {"Granularity": "1Minute", "Metrics": ["GroupInServiceInstances"]}
+        {"Granularity": "1Minute", "Metrics": ["GroupInServiceInstances", "GroupDesiredCapacity"]}
     ]
     alarm = alarms(resources)["kb-capacity-max"]
     assert (alarm["Namespace"], alarm["MetricName"]) == ("AWS/AutoScaling", "GroupInServiceInstances")

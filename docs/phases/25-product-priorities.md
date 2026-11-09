@@ -26,7 +26,7 @@ Status words: not started, in progress, implemented (code written), tested (loca
 | 25.3 Health checks | `/healthz` only, and the ALB uses it; it returns 503 when the database is unreachable for 60 s | `/livez` for the ALB, `/healthz` stays the readiness check | tested (SQLite legs; `pg` legs need `KB_TEST_DATABASE_URL`) |
 | 25.4 Write auth | Implemented and tested in phase 24 (MCP), phases 05 to 16 (REST, UI) | Audit every write route and tool; fill test gaps only | tested (no code change needed; guard tests added) |
 | 25.5 Backups | 1 day RDS retention, `DeletionPolicy: Delete`, no deletion protection; S3 export nightly | Retention 7, snapshot on delete and replace, protection parameter, teardown script, probe, `docs/RECOVERY.md` | tested (templates and scripts with stubs); restore test not run (needs a deployed `kb-db` and approval) |
-| 25.6 Alarms | 3 of 7 alarms can never receive data | Conditional custom-metric alarms; ALB, Auto Scaling and RDS alarms; dashboard; runbook | not started |
+| 25.6 Alarms | 3 of 7 alarms can never receive data | Conditional custom-metric alarms; ALB, Auto Scaling and RDS alarms; dashboard; runbook | tested (templates); not deployed, metric data and email delivery not verified |
 
 ## Live audit (2026-11-08, read only)
 
@@ -128,9 +128,33 @@ Token handling: `check_token` compares every configured secret with `hmac.compar
 
 **Tests (`tests/test_infra.py`):** db template settings, parameters and exports; deploy overrides; dated copies and the 14-copy limit; teardown-db (order of modify and delete, refusal with `kb-app` present, stale, missing or damaged laptop copy, wrong confirmation, protection restored on a failed delete, protection already off, no stack); restore-test (nothing created without confirmation, cleanup never deletes an instance outside its prefix, deletes its own copy without a final snapshot, no write call names the source).
 
-## 25.6
+## 25.6 CloudWatch alarms and monitoring
 
-Filled in when the sub-phase is done.
+**Audit of the seven alarms before this phase:**
+
+| Alarm | Metric | Gets data in the sandbox? | Decision |
+| --- | --- | --- | --- |
+| `kb-keyword-mode` | `KbMcp` `KeywordSearches` | No: `MetricsMode=off` by default and `myS3Role` cannot `PutMetricData` (simulated 2026-11-08: implicit deny) | Created only when `MetricsMode` is `api` or `emf` (condition `PublishesMetrics`) |
+| `kb-high-latency` | `KbMcp` `LatencyMs` p90 | No, same reason | Same condition; `kb-response-time` (ALB) covers latency in the sandbox |
+| `kb-memory` | `CWAgent` `mem_used_percent` | No: the agent needs `PutMetricData` too | Same condition |
+| `kb-5xx` | ALB `HTTPCode_Target_5XX_Count` | Yes | Kept |
+| `kb-unhealthy-host` | ALB `UnHealthyHostCount` | Yes | Kept (with `/livez` it now means the process is not answering) |
+| `kb-no-healthy-host` | ALB `HealthyHostCount`, missing is breaching | Yes | Kept |
+| `kb-capacity-max` | `GroupInServiceInstances` (group metrics, postgres) | Yes (went to ALARM in phase 23) | Kept |
+
+**Added, all on AWS-published metrics:** `kb-elb-5xx` (ALB-generated 5xx; phase 23 run1's 76 percent 502s were never counted by `kb-5xx`), `kb-response-time` (ALB `TargetResponseTime` p90 above 6 s for 10 minutes), `kb-cpu` (group average EC2 CPU above 85 percent for 15 minutes), `kb-capacity-short` (metric math, desired minus in-service at least 1 for 15 minutes; group metrics collection is now on in both modes with `GroupDesiredCapacity`), and in postgres mode `kb-db-cpu` (above 80 percent, 15 minutes), `kb-db-connections` (above 60, 10 minutes), `kb-db-storage` (under 2 GB free, 10 minutes), reading the new `kb-DbInstanceId` export. Metrics that AWS publishes continuously use `TreatMissingData: missing`, so silence shows as INSUFFICIENT_DATA rather than OK.
+
+**Dashboards:** `kb-mcp` now reads only AWS metrics (requests and both kinds of 5xx, response time, hosts, desired and in-service instances, CPU); `kb-mcp-db` (postgres) shows RDS; `kb-mcp-search` (`PublishesMetrics`) keeps the custom search and memory widgets.
+
+**Notifications:** unchanged (topic `kb-alerts`, one email subscription that must be confirmed by hand). `docs/ALARMS.md` gives the `set-alarm-state` test for delivery.
+
+**Runbook:** `docs/ALARMS.md` (meaning, cause and response for every alarm, how to check that an alarm has data, status).
+
+**Template size:** `app.yaml` grew to 49,334 bytes; `validate-template --template-body` and `deploy --template-file` without `--s3-bucket` stop at 51,200. New test: every template stays 1 KB below that. Comments in the new alarms were kept short for this reason (open issue: move `deploy.sh` to `--s3-bucket` before the template grows again).
+
+**Tests (`tests/test_infra.py`):** alarm set per database mode and metrics mode (`off`, `api`, `emf`); with the default `MetricsMode` no alarm reads a non-`AWS/` namespace; thresholds and missing-data handling of every alarm; ALB, RDS and EC2 dimensions; RDS alarms read `kb-DbInstanceId` and every resource that imports it is postgres-only; the metric math of `kb-capacity-short` and that both its metrics are collected; dashboards are valid JSON and the main one reads only AWS namespaces; template size.
+
+**Not verified (needs a deploy and approval):** that each alarm's metric has data, alarm state changes, and SNS delivery.
 
 ## Do not
 

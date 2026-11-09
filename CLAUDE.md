@@ -6,6 +6,7 @@ Knowledge-base MCP server for the Cloud Computing course (AWS Academy Cloud Arch
 - Work breakdown: `docs/phases/` (one file per phase, index in `docs/phases/README.md`)
 - Progress log, stack outputs, deviations: `docs/PROGRESS.md`
 - Computer and AWS credentials setup (Linux and Windows): `docs/SETUP.md`
+- Backups, restore procedures, RPO and RTO: `docs/RECOVERY.md`; alarms and their runbook: `docs/ALARMS.md`
 
 ## How to work in this repo
 
@@ -83,7 +84,7 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 | `KB_EXTENSION_ORIGIN` | unset | `chrome-extension://<id>`, the only origin CORS allows (methods GET, POST, PATCH, DELETE; headers Authorization, Content-Type). Unset means no CORS headers at all. Set on the stack with the `ExtensionOrigin` parameter (`KB_EXTENSION_ORIGIN` for `infra/deploy.sh`) |
 | `KB_SEARCH_RATE` | `120/minute` | Search rate limit per client address (raised from 30 in phase 24 so a class behind one campus NAT shares a workable budget; admission control, not this limit, protects against overload), one shared budget for `GET /api/search`, the UI search pages and the MCP `search` tool (stdio is unlimited). Over the limit: HTTP 429, or the tool error "Rate limit exceeded, try again in a minute". A malformed value stops startup |
 | `KB_PROXY_HOPS` | `0` | Number of proxies in front of the app that each append to `X-Forwarded-For` (2 behind CloudFront and the ALB, set in the instance user data). The client address is the entry that many places from the right; `0` ignores the header. uvicorn's own proxy handling is off |
-| `KB_METRICS_MODE` | `emf` | `emf`, `api` or `off`. `api` sends search metrics with `put_metric_data` instead of EMF log lines; `off` publishes nothing and starts no sender (a plain "search metrics" log line only). The stack parameter `MetricsMode` defaults to `off` because the sandbox instance role cannot publish metrics |
+| `KB_METRICS_MODE` | `emf` | `emf`, `api` or `off`. `api` sends search metrics with `put_metric_data` instead of EMF log lines; `off` publishes nothing and starts no sender (a plain "search metrics" log line only). The stack parameter `MetricsMode` defaults to `off` because the sandbox instance role cannot publish metrics; the `KbMcp` and `CWAgent` alarms and the `kb-mcp-search` dashboard exist only when it is not `off` (phase 25.6) |
 | `KB_TEST_DATABASE_URL` | unset | **Test only.** A scratch PostgreSQL database for the tests (their tables are emptied before each test). Unset skips the PostgreSQL legs |
 | `KB_FAKE_MODELS` | unset | **Test only.** `1` swaps in the doubles from `tests/fakes.py` for the real models (inert unless `tests/` is importable, so inert in the image). Never set it in a deployment |
 
