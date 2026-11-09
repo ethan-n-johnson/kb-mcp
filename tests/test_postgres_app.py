@@ -260,3 +260,32 @@ def test_eval_on_postgres_searches_the_database_and_leaves_no_gaps(
     assert report.dup.original_similarity is not None and report.dup.original_similarity > 0.9
     # The outside question logged a gap while it ran; only the earlier row remains.
     assert pg_store.fetchone("SELECT count(*) AS n FROM gaps")["n"] == 1
+
+
+def test_connections_killed_by_a_failover_are_replaced_before_use(open_app: OpenApp) -> None:
+    """After every pooled backend is gone (an RDS failover), each request still gets a working connection.
+
+    Without the pool's connection check, every stale connection would fail one
+    request with `OperationalError` (a 500) before the pool noticed it.
+    """
+    import psycopg
+
+    from kb.store.postgres import POOL_MAX, get_pool
+
+    with open_app() as client:
+        ids = load_corpus(client)
+        url = client.app.state.settings.database_url
+        pool = get_pool(url)
+        held = [pool.getconn() for _ in range(POOL_MAX)]  # fill the pool, then return them all idle
+        for conn in held:
+            pool.putconn(conn)
+        with psycopg.connect(url, autocommit=True) as admin:
+            killed = admin.execute(
+                "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity "
+                "WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'"
+            ).fetchone()[0]
+        assert killed >= POOL_MAX
+        statuses = [client.get(f"/api/docs/{doc_id}").status_code for doc_id in list(ids.values()) * 2]
+        found = search(client, QUERIES["ebs_linux"][0])
+    assert statuses and set(statuses) == {200}
+    assert found["results"]
