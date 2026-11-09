@@ -150,3 +150,59 @@ def test_two_tokens_are_told_apart_in_the_audit_log(
     ]
     assert doc["verified_by"] == "bob"
     assert "tok-a" not in str(entries) and "tok-b" not in str(entries)
+
+
+# --- every state-changing REST route is gated (phase 25.4) ---------------------------------
+
+# Every non-GET route in the OpenAPI schema and what authorizes it. A new write
+# route fails this test until it is classified here (and gated).
+GATED_BY_TOKEN = {
+    ("POST", "/api/docs"),
+    ("POST", "/api/docs/file"),
+    ("POST", "/api/docs/merge"),
+    ("POST", "/api/ingest"),
+    ("POST", "/api/upload-links"),
+    ("PATCH", "/api/docs/{doc_id}"),
+    ("DELETE", "/api/docs/{doc_id}"),
+    ("POST", "/api/docs/{doc_id}/verify"),
+    ("POST", "/api/admin/fallback"),
+    ("POST", "/api/admin/export"),
+}
+# The upload link: the single-use ticket a token holder was issued is the permission.
+GATED_BY_TICKET = {("POST", "/api/uploads/{ticket}"), ("PUT", "/api/uploads/{ticket}")}
+
+
+def _non_get_routes(client: TestClient) -> set[tuple[str, str]]:
+    paths = client.get("/openapi.json").json()["paths"]
+    return {(m.upper(), p) for p, methods in paths.items() for m in methods if m not in ("get", "head", "options")}
+
+
+def test_every_non_get_route_is_classified(open_app: OpenApp) -> None:
+    with open_app(models=False) as client:
+        assert _non_get_routes(client) == GATED_BY_TOKEN | GATED_BY_TICKET
+
+
+@pytest.mark.parametrize("method, path", sorted(GATED_BY_TOKEN), ids=[f"{m} {p}" for m, p in sorted(GATED_BY_TOKEN)])
+def test_every_token_gated_route_refuses_and_changes_nothing(open_app: OpenApp, method: str, path: str) -> None:
+    with open_app(models=False) as client:
+        doc_id = upload(client, EBS)
+        url = path.replace("{doc_id}", str(doc_id))
+        before = (audit_rows(client), scalar(client, "SELECT count(*) FROM docs"), get_doc(client, doc_id, chunks=False))
+        for headers in (None, {"Authorization": "Bearer wrong"}, {"Authorization": "Basic testtoken"}):
+            resp = client.request(method, url, json={}, headers=headers)
+            assert resp.status_code == 401, (headers, resp.status_code, resp.text)
+            assert resp.json()["error"] == "unauthorized"
+            assert "wrong" not in resp.text and "testtoken" not in resp.text
+        after = (audit_rows(client), scalar(client, "SELECT count(*) FROM docs"), get_doc(client, doc_id, chunks=False))
+        toggle = client.get("/healthz").json()["fallback_toggle"]
+    assert after == before
+    assert toggle is False
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT"])
+def test_an_upload_without_a_valid_ticket_is_refused_and_writes_nothing(open_app: OpenApp, method: str) -> None:
+    with open_app(models=False) as client:
+        resp = client.request(method, "/api/uploads/not-a-ticket", content=b"# hi\n\ntext", headers=AUTH)
+        docs = scalar(client, "SELECT count(*) FROM docs")
+    assert resp.status_code == 404 and resp.json()["error"] == "bad_ticket"
+    assert docs == 0

@@ -24,7 +24,7 @@ Status words: not started, in progress, implemented (code written), tested (loca
 | 25.1 Shared search | Implemented and tested in phases 20 and 21; deployed in account `983926826929` | Pool checks each connection before use (RDS failover) | tested (SQLite legs; the `pg` legs need `KB_TEST_DATABASE_URL`, see 25.1) |
 | 25.2 Scale-out | Implemented, tested and deployed in phases 22, 23, 23a | One nightly export per group, not one per instance; single NAT gateway documented | tested (SQLite legs; `pg` legs need `KB_TEST_DATABASE_URL`) |
 | 25.3 Health checks | `/healthz` only, and the ALB uses it; it returns 503 when the database is unreachable for 60 s | `/livez` for the ALB, `/healthz` stays the readiness check | tested (SQLite legs; `pg` legs need `KB_TEST_DATABASE_URL`) |
-| 25.4 Write auth | Implemented and tested in phase 24 (MCP), phases 05 to 16 (REST, UI) | Audit every write route and tool; fill test gaps only | not started |
+| 25.4 Write auth | Implemented and tested in phase 24 (MCP), phases 05 to 16 (REST, UI) | Audit every write route and tool; fill test gaps only | tested (no code change needed; guard tests added) |
 | 25.5 Backups | 1 day RDS retention, `DeletionPolicy: Delete`, no deletion protection; S3 export nightly | Retention 7, snapshot on delete and replace, protection parameter, teardown script, probe, `docs/RECOVERY.md` | not started |
 | 25.6 Alarms | 3 of 7 alarms can never receive data | Conditional custom-metric alarms; ALB, Auto Scaling and RDS alarms; dashboard; runbook | not started |
 
@@ -88,7 +88,25 @@ Account `834269865094` (AWS Academy Learner Lab, role `voclabs`), not the Cloud 
 
 **Tests:** `tests/test_health.py`: both endpoints 200 on a normal app; with the SQLite connection closed `/healthz` is 503 and `/livez` 200; `/livez` works with the store opener patched to fail and the search state removed; `/livez` carries no diagnostics; `pg`: with the monitor's last check 61 s old, and with the monitor unable to reach the database, `/healthz` is 503 and `/livez` 200. `tests/test_infra.py`: the target group uses `/livez` with matcher 200, the group uses ELB health checks, the user data still waits for `/healthz` and never uses `/livez`.
 
-## 25.4 to 25.6
+## 25.4 Write authentication
+
+**Audit (each interface read in the code, not taken from the docs):**
+
+| Interface | Writes | Gate | Tests before phase 25 |
+| --- | --- | --- | --- |
+| MCP over HTTP | `upload`, `upload_file`, `update`, `delete`, `merge`, `ingest_url`, `verify` | `require_http_writer` runs first inside `call_write`, before a connection is opened; missing, wrong, malformed token or an unreadable token store all refuse with one message (fail closed) | `tests/test_mcp.py`: 5 bad header shapes against all 7 tools with docs and audit counts unchanged; valid token works and audits the token name; `upload_file` refused hands out no link; annotations (`readOnlyHint`) match the split; token never logged |
+| MCP over stdio | same tools | none by design (local process, `KB_TOKEN` only names the actor) | `tests/test_mcp_stdio.py` |
+| REST | the 10 routes in `GATED_BY_TOKEN` | `Depends(require_writer)` (`kb/auth.py`) | 5 routes with bad tokens and unchanged data (`tests/test_write_routes.py`), ingest, the others in their own modules |
+| REST upload link | `POST`/`PUT /api/uploads/{ticket}` | the single-use ticket a token holder was issued (SHA-256 stored, one `UPDATE ... RETURNING` in PostgreSQL) | `tests/test_upload_links.py`, `tests/test_scale_out.py` |
+| UI | `/ui/add/paste`, `/ui/add/file`, `/ui/add/url`, `/ui/docs/{id}/verify`, `/ui/admin/fallback` | `require_writer(request)` before the service call | `tests/test_ui.py::test_write_buttons_without_a_token_get_401_with_a_message` |
+
+Token handling: `check_token` compares every configured secret with `hmac.compare_digest` and does not stop at the first match; the 401 message is the same for a missing and a wrong token and never echoes the header; tokens come from `KB_WRITE_TOKENS` (local), S3 `config/write-tokens` (instances) or SSM, never from code or images; `tests/test_security.py` and `tests/test_mcp.py` check that no token or `Authorization` header reaches the logs. CloudFront forwards `Authorization` (origin request policy `AllViewerExceptHostHeader` on `/api/*` and `/mcp*`).
+
+**Result:** already correct; nothing in `kb/` changed. The one gap was a guard for future routes: nothing failed if a new state-changing REST route forgot the dependency.
+
+**Tests added (`tests/test_write_routes.py`):** the set of non-GET routes in the OpenAPI schema must equal the classified set (10 token-gated, 2 ticket-gated), so a new write route fails until it is classified; each of the 10 token-gated routes answers 401 to no token, a wrong token and a `Basic` header without echoing them, and the audit log, the doc count, the doc itself and the fallback toggle are unchanged; the upload route with an unknown ticket answers 404 `bad_ticket` and stores nothing.
+
+## 25.5 and 25.6
 
 Filled in as each sub-phase is done.
 
