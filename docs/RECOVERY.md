@@ -21,7 +21,19 @@ Everything else (models, image, code) can be rebuilt; only the documents, chunks
 | Laptop copy (`~/.config/kb-mcp/kb-latest.db.gz` plus `~/.config/kb-mcp/saved/kb-<UTC time>.db.gz`) | The operator's laptop, outside the repo | The operator: `infra/up.sh save` | Before every session end and before class | The newest 14 dated copies | Yes | **Yes: the only copy that does** |
 | `sqlite` mode: S3 snapshot plus nightly `backups/` | `kb-data` bucket | The app (`kb/snapshot.py`, cron `backup`) | After every write, nightly | 30 days | n/a | No |
 
-**AWS Academy sandbox resets.** A timed-out or reset lab session can come back as a new, empty account (seen twice, 2026-10-09). That deletes every stack, the RDS instance, its automated backups, every RDS snapshot and the S3 bucket with all its versions. Only the laptop copy survives. Treat `infra/up.sh save` as part of ending every session, and keep a second copy of `~/.config/kb-mcp/saved/` somewhere else (another disk or cloud drive) if the data matters.
+**AWS Academy sandbox resets.** A timed-out or reset lab session can come back as a new, empty account (seen twice, 2026-10-09). That deletes every stack, the RDS instance, its automated backups, every RDS snapshot and the S3 bucket with all its versions. Only the laptop copy survives. Treat `infra/up.sh save` as part of ending every session, and keep a second copy of `~/.config/kb-mcp/saved/` somewhere else (another disk or cloud drive) if the data matters. Read "Known gap in `infra/up.sh save`" below first: until phase 26 fixes it, a save can replace the only good copy.
+
+## Known gap in `infra/up.sh save` (open, found 2026-11-09, fix planned in phase 26)
+
+`save_snapshot` in `infra/up.sh` downloads `snapshots/kb-latest.db.gz` and moves it over `~/.config/kb-mcp/kb-latest.db.gz` **before** anything checks it, and the dated copy in `saved/` is made from the new file, not the old one. Nothing tests the download (gzip, `integrity_check`, document count). If the bucket holds an empty or damaged database (for example after a deploy that started empty, or a bad import), one save replaces the last good laptop copy, and in a reset sandbox that copy is the only one left. As of 2026-11-09 the only known copy of the corpus is the Oct 14 file (63 documents, 761 chunks) and `saved/` does not exist yet.
+
+Until the fix (`docs/FINAL_PROJECT_ROADMAP.md`, phase 26) lands:
+
+1. Do not run `infra/up.sh save` unless you need to. Never run it right after a deploy that reported "the app starts empty".
+2. If you must save, first copy the current file somewhere `save` never touches: `cp -p ~/.config/kb-mcp/kb-latest.db.gz ~/kb-latest-before-save-$(date -u +%Y%m%dT%H%M%SZ).db.gz`.
+3. After the save, check the new file before trusting it: `gzip -t ~/.config/kb-mcp/kb-latest.db.gz`, then decompress it to a temporary file and check `PRAGMA integrity_check` and `SELECT count(*) FROM docs` against what you expect. If either fails, put the copy from step 2 back.
+
+The planned fix: copy the current file into `saved/` first, download to a temporary file, check gzip, integrity and the document count, and keep the old file when the check fails or the count drops (unless forced).
 
 ## Recovery objectives
 
@@ -111,7 +123,7 @@ Cost: about 0.017 USD per hour for the instance plus a few cents of storage; 20 
 | Item | State |
 | --- | --- |
 | 7 day retention, Snapshot policies, deletion protection, backup and maintenance windows, `kb-DbInstanceId` export | Implemented and tested in `infra/db.yaml` (`tests/test_infra.py`, cfn-lint); **not deployed** |
-| `infra/teardown-db.sh`, dated laptop copies in `infra/up.sh save` | Implemented and tested with stub AWS commands; not run against AWS |
+| `infra/teardown-db.sh`, dated laptop copies in `infra/up.sh save` | Implemented and tested with stub AWS commands; not run against AWS. **Known gap:** the dated copy is made from the new download, after the old file is replaced, and the download is not checked (see "Known gap in `infra/up.sh save`"; fix planned in phase 26) |
 | Lab permissions for modify, snapshot, restore and delete | Allowed by the IAM policy simulator (`infra/probe-rds.sh` section 8, 2026-11-08) for gp2 at 20 GB; a real call is the final answer |
 | 7 day retention accepted by the lab | Unknown until `kb-db` is deployed (no condition key covers it); fall back with `KB_DB_BACKUP_DAYS` if refused |
 | RDS point-in-time restore | **Not tested.** `infra/restore-test-db.sh` is written and stub-tested; it needs a deployed `kb-db` and approval |

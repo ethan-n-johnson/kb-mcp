@@ -7,6 +7,7 @@ Knowledge-base MCP server for the Cloud Computing course (AWS Academy Cloud Arch
 - Progress log, stack outputs, deviations: `docs/PROGRESS.md`
 - Computer and AWS credentials setup (Linux and Windows): `docs/SETUP.md`
 - Backups, restore procedures, RPO and RTO: `docs/RECOVERY.md`; alarms and their runbook: `docs/ALARMS.md`
+- Remaining work, open findings and phases 26 onward: `docs/FINAL_PROJECT_ROADMAP.md`
 
 ## How to work in this repo
 

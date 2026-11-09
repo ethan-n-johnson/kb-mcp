@@ -7,7 +7,7 @@ What the demo shows (`docs/DEMO.md`): searching the web UI and Claude Code over 
 - **12 MCP tools** for searching, adding, editing and uploading documents, over HTTP (`/mcp`) or stdio.
 - **Over HTTP the five read tools need no token; the seven write tools need a write token** (phase 24 decision, see Known limitations). The REST API, web UI and Chrome extension need a write token for writes too.
 - **One command deploys everything:** `infra/up.sh` builds the image and deploys the four stacks (`kb-network`, `kb-data`, `kb-db`, `kb-app`). `infra/up.sh save` backs up the database before the sandbox session ends.
-- **Students:** `docs/STUDENTS.md`. **Instructor runbook:** `docs/DEMO.md`. **Decisions and measurements:** `docs/PROGRESS.md`. **Security:** `docs/SECURITY_REVIEW.md`. **Setup detail for Linux and Windows:** `docs/SETUP.md`.
+- **Students:** `docs/STUDENTS.md`. **Instructor runbook:** `docs/DEMO.md`. **Decisions and measurements:** `docs/PROGRESS.md`. **Security:** `docs/SECURITY_REVIEW.md`. **Setup detail for Linux and Windows:** `docs/SETUP.md`. **Backups and recovery:** `docs/RECOVERY.md`. **Alarms:** `docs/ALARMS.md`. **Remaining work and phases 26 onward:** `docs/FINAL_PROJECT_ROADMAP.md`.
 
 ---
 
@@ -278,6 +278,8 @@ infra/deploy.sh network|data|db|app [ImageTag]    # one stack by hand; infra/pus
 ```
 
 `infra/up.sh` is safe to run again at any time: unchanged stacks report "No changes to deploy". It prints the CloudFront domain at the end. The first deploy in a new account takes about 30 minutes (measured 2026-11-07 from an empty account: 26 minutes in all, of which `kb-db` about 15, the image build and upload about 3 and `kb-app` about 6; allow more for a slow network). After every deploy, run one warm-up search before anyone else does. In `postgres` mode `infra/up.sh save` first asks the app to export RDS to S3, then downloads the export.
+
+**Known gap (open, fix planned in phase 26):** `infra/up.sh save` replaces `~/.config/kb-mcp/kb-latest.db.gz` before it checks the download or keeps a copy of the old file, so a save from an empty or damaged bucket snapshot can overwrite the only good copy. Until it is fixed, copy the file elsewhere before saving and check the new one afterwards (`docs/RECOVERY.md`, "Known gap in `infra/up.sh save`").
 
 Delete `kb-db` only with `infra/teardown-db.sh`, after `infra/up.sh save` and `infra/teardown-app.sh` (`kb-app` imports `kb-DbClientSg`). Since phase 25.5 `kb-db` has deletion protection, 7 days of automated backups and a final snapshot on delete, so a plain `delete-stack` fails; the script checks the laptop copy, turns protection off, and deletes. Backup layers, recovery objectives and every restore procedure are in `docs/RECOVERY.md`.
 

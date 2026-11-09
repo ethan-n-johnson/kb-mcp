@@ -20,7 +20,7 @@ Work back from the start of class (T).
 | T minus 25 min | `scripts/demo_check.sh "$CF"` must print all PASS (mode `semantic`, both models ok, `postgres` mode, 2 or more healthy targets, the two demo searches `high`, the out-of-corpus search `low`, the 3 stale docs, 12 tools, MCP writes refused without a token, a static asset with `Cache-Control`). Note: the check's out-of-corpus search is logged as a gap whose text starts with "demo check:". |
 | T minus 20 min | `infra/class-capacity.sh status` shows 4 in service and 4 healthy targets. |
 | T minus 15 min | One warm-up search in the web UI and one in Claude Code (the first semantic search after a deploy is the slow one). Fallback toggle off (Maintenance page, or `demo_check.sh` says so). Re-run `claude mcp add` if the CloudFront domain changed (read-only for students, with `--header "Authorization: Bearer $KB_TOKEN"` for you). Set the extension's server URL (only if the extension was tested). Open the browser tabs (UI, CloudFormation, EC2 Auto Scaling, CloudWatch) and a terminal. |
-| T minus 5 min | `infra/up.sh save` so the restore point matches the class start: the bucket has a fresh export and `~/.config/kb-mcp/kb-latest.db.gz` has a copy. Share `docs/STUDENTS.md` and the URL. |
+| T minus 5 min | `infra/up.sh save` so the restore point matches the class start: the bucket has a fresh export and `~/.config/kb-mcp/kb-latest.db.gz` has a copy. Until phase 26 fixes it, copy the old laptop file elsewhere first and check the new one after (`docs/RECOVERY.md`, "Known gap in `infra/up.sh save`"). Share `docs/STUDENTS.md` and the URL. |
 
 ### Scaling to 4 instances before class
 

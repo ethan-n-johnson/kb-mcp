@@ -239,6 +239,8 @@ The sandbox gives you temporary credentials that stop working when the lab sessi
    ```
 
    It downloads `snapshots/kb-latest.db.gz` to `~/.config/kb-mcp/kb-latest.db.gz`. Without it, a new account starts with an empty knowledge base. When `kb-app` runs in PostgreSQL mode (`KB_DATABASE_MODE=postgres` in `up.env`, `DatabaseMode=postgres`), the snapshot is only refreshed by the app, so `up.sh save` first asks it for a fresh export (`POST /api/admin/export`, authorized with the first token in `~/.config/kb-mcp/write-tokens`) and stops if that fails. The same file restores either mode: SQLite restores it directly, PostgreSQL imports it into an empty database at boot.
+
+   **Known gap (open, fix planned in phase 26):** `save` replaces the laptop file before checking the download or keeping a copy of the old one. Until it is fixed, follow `docs/RECOVERY.md`, "Known gap in `infra/up.sh save`" (copy the file elsewhere first, check the new one afterwards).
 7. Start Claude Code in `kb-mcp` and continue with the next phase (`docs/phases/README.md` has the prompt).
 
 When any AWS command later fails with `ExpiredToken` or `InvalidClientTokenId`, the session ran out: click Start Lab again and repeat steps 2 to 5.
