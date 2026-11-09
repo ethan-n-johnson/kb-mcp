@@ -19,6 +19,9 @@
 #   KB_DB_VERSION                 EngineVersion
 #   KB_DB_MULTI_AZ                true or false (MultiAz)
 #   KB_DB_ENCRYPTED               true or false (StorageEncrypted)
+#   KB_DB_BACKUP_DAYS             1 to 35 (BackupRetentionDays, default 7)
+#   KB_DB_DELETION_PROTECTION     true or false (DeletionProtection, default true;
+#                                 infra/teardown-db.sh turns it off before a delete)
 #
 # The app stack needs two values from the environment (the script stops with an
 # error if one is missing):
@@ -133,6 +136,8 @@ case "$1" in
     [ -z "${KB_DB_VERSION:-}" ] || db_params+=("EngineVersion=$KB_DB_VERSION")
     [ -z "${KB_DB_MULTI_AZ:-}" ] || db_params+=("MultiAz=$KB_DB_MULTI_AZ")
     [ -z "${KB_DB_ENCRYPTED:-}" ] || db_params+=("StorageEncrypted=$KB_DB_ENCRYPTED")
+    [ -z "${KB_DB_BACKUP_DAYS:-}" ] || db_params+=("BackupRetentionDays=$KB_DB_BACKUP_DAYS")
+    [ -z "${KB_DB_DELETION_PROTECTION:-}" ] || db_params+=("DeletionProtection=$KB_DB_DELETION_PROTECTION")
     deploy_stack db --parameter-overrides "${db_params[@]}"
     ;;
   app)

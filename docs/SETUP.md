@@ -223,7 +223,7 @@ The sandbox gives you temporary credentials that stop working when the lab sessi
 
    The first time, create `~/.config/kb-mcp/up.env` with one line, `KB_ALERT_EMAIL=you@example.com` (that folder is outside the repo). `up.sh` deploys `kb-network` and `kb-data`, uploads the write tokens (from `~/.config/kb-mcp/write-tokens`, generated there on the first run; open that file to copy them), uploads your saved database snapshot if the bucket has none, deploys `kb-db` (RDS PostgreSQL) and stores its connection URL at `s3://<bucket>/config/database-url`, builds and uploads the image unless the bucket already has it for the current commit, looks up the CloudFront prefix list and deploys `kb-app`. On an empty account this takes about 30 to 55 minutes (image upload, NAT gateway, CloudFront, and **`kb-db` takes 10 to 25 minutes on the first deploy**; Multi-AZ is the slow end). Confirm the SNS email again after a new account.
 
-   `up.sh` creates `~/.config/kb-mcp/db-password` on the first run (32 random letters and digits, mode 600) and never prints it. Keep that file: `kb-db` is created with it, and a later deploy with a different password would change the database's master password. If you lose the file while `kb-db` exists, delete `kb-db` (after an export, phase 20) and let `up.sh` generate a new one.
+   `up.sh` creates `~/.config/kb-mcp/db-password` on the first run (32 random letters and digits, mode 600) and never prints it. Keep that file: `kb-db` is created with it, and a later deploy with a different password would change the database's master password. If you lose the file while `kb-db` exists, run `infra/up.sh save`, `infra/teardown-app.sh` and `infra/teardown-db.sh` (deletion protection is on, so a plain `delete-stack` fails; `docs/RECOVERY.md`), and let `up.sh` generate a new one.
 
    To see what RDS the sandbox allows (versions, instance classes, Multi-AZ, quotas, whether a DB subnet group can be created), run the read-only probe once `kb-network` exists:
 
@@ -239,6 +239,8 @@ The sandbox gives you temporary credentials that stop working when the lab sessi
    ```
 
    It downloads `snapshots/kb-latest.db.gz` to `~/.config/kb-mcp/kb-latest.db.gz`. Without it, a new account starts with an empty knowledge base. When `kb-app` runs in PostgreSQL mode (`KB_DATABASE_MODE=postgres` in `up.env`, `DatabaseMode=postgres`), the snapshot is only refreshed by the app, so `up.sh save` first asks it for a fresh export (`POST /api/admin/export`, authorized with the first token in `~/.config/kb-mcp/write-tokens`) and stops if that fails. The same file restores either mode: SQLite restores it directly, PostgreSQL imports it into an empty database at boot.
+
+   **Known gap (open, fix planned in phase 26):** `save` replaces the laptop file before checking the download or keeping a copy of the old one. Until it is fixed, follow `docs/RECOVERY.md`, "Known gap in `infra/up.sh save`" (copy the file elsewhere first, check the new one afterwards).
 7. Start Claude Code in `kb-mcp` and continue with the next phase (`docs/phases/README.md` has the prompt).
 
 When any AWS command later fails with `ExpiredToken` or `InvalidClientTokenId`, the session ran out: click Start Lab again and repeat steps 2 to 5.

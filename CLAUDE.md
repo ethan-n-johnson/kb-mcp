@@ -6,6 +6,8 @@ Knowledge-base MCP server for the Cloud Computing course (AWS Academy Cloud Arch
 - Work breakdown: `docs/phases/` (one file per phase, index in `docs/phases/README.md`)
 - Progress log, stack outputs, deviations: `docs/PROGRESS.md`
 - Computer and AWS credentials setup (Linux and Windows): `docs/SETUP.md`
+- Backups, restore procedures, RPO and RTO: `docs/RECOVERY.md`; alarms and their runbook: `docs/ALARMS.md`
+- Remaining work, open findings and phases 26 onward: `docs/FINAL_PROJECT_ROADMAP.md`
 
 ## How to work in this repo
 
@@ -29,7 +31,7 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 - Fast tests on both backends: `docker run -d --name kb-pg -e POSTGRES_PASSWORD=dev -p 5432:5432 pgvector/pgvector:pg16`, then `KB_TEST_DATABASE_URL=postgresql://postgres:dev@localhost:5432/postgres pytest -q -m "not models"` (modules marked `dual` run on SQLite and PostgreSQL, tests marked `pg` only on PostgreSQL)
 - Model tests (loads real ONNX models, slower): `pytest -q -m models`
 - Run locally: `KB_DB=./.localdata/kb.db KB_WRITE_TOKENS=dev:devtoken uvicorn kb.main:app --port 8000 --workers 1`
-- PostgreSQL mode locally: add `KB_DATABASE_URL=postgresql://postgres:dev@localhost:5432/kb` to the commands above (create the database first). Copy data between the two: `python -m kb.cli import-sqlite --from <file, s3://... or key>` (into an empty database; `--if-empty`, `--force`) and `python -m kb.cli export-sqlite --to <file or s3://...>` (default: the S3 snapshot key)
+- PostgreSQL mode locally: add `KB_DATABASE_URL=postgresql://postgres:dev@localhost:5432/kb` to the commands above (create the database first). Copy data between the two: `python -m kb.cli import-sqlite --from <file, s3://... or key>` (into an empty database; `--if-empty`, `--force`) and `python -m kb.cli export-sqlite --to <file or s3://...>` (default: the S3 snapshot key; `--once-per SECONDS` skips when any instance exported within that window, used by the nightly cron)
 - Stdio MCP: `KB_DB=./.localdata/kb.db python -m kb.cli mcp-stdio` (local and trusted, so no token is needed; add `KB_WRITE_TOKENS=dev:devtoken KB_TOKEN=devtoken` to record writes as `dev` instead of `mcp`)
 - Seed: `KB_DB=./.localdata/seed/kb.db KB_MODEL_DIR=./.localdata/models python -m kb.cli seed seeds/seeds.yaml` (`--dry-run` checks every entry without writing); then `python -m kb.cli eval tests/eval/questions.yaml` and `KB_BUCKET=<bucket> python -m kb.cli snapshot-push` (docs/SETUP.md, "Seed the demo corpus")
 - Lint infra: `cfn-lint infra/*.yaml`
@@ -46,7 +48,8 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 - Embeddings are stored as float32, L2-normalized BLOBs in `chunks.embedding` (PostgreSQL: `vector(384)`, handed to and from the code as the same bytes), with `chunks.embed_model` set.
 - Every interface (REST, MCP over HTTP, MCP over stdio, UI, extension) calls `kb/service.py`. No business logic in `api.py`, `mcp_tools.py`, `ui.py` or templates.
 - Logs are one JSON object per line. Stdout in server mode; **stderr in stdio MCP mode** (stdout carries the protocol).
-- `GET /healthz` returns 200 whenever the database is readable, including in keyword mode. Model failure must never make the ALB kill the instance. In PostgreSQL mode it answers from a cache that `kb/health.py` (a daemon thread with its own connection) refreshes every 10 s (503 when the last success is over 60 s old); it never takes a pooled connection or a worker thread, and the same thread reads the fallback toggle, so no request path touches the pool for either.
+- `GET /livez` (phase 25.3) is the ALB health check: 200 whenever the process answers HTTP; it reads no database, cache, model or worker thread, so a database outage or RDS failover never makes the load balancer replace every instance. Never add a dependency check to it.
+- `GET /healthz` is readiness and diagnostics (the boot waits for it before `cfn-signal`; `scripts/demo_check.sh` reads it). It returns 200 whenever the database is readable, including in keyword mode. Model failure must never make the ALB kill the instance. In PostgreSQL mode it answers from a cache that `kb/health.py` (a daemon thread with its own connection) refreshes every 10 s (503 when the last success is over 60 s old); it never takes a pooled connection or a worker thread, and the same thread reads the fallback toggle, so no request path touches the pool for either.
 - MCP over HTTP: the read tools (`search`, `get`, `list_tags`, `stale`, `gaps`) need no token; the write tools (`upload`, `upload_file`, `update`, `delete`, `merge`, `ingest_url`, `verify`) need `Authorization: Bearer <write token>` and fail closed (phase 24, PROGRESS.md deviation "MCP tools need no token", follow-up). MCP over stdio is local and trusted, so writes stay tokenless there. REST, UI and extension writes need a token too.
 - Secrets never go in code, user data, Docker images or git. Write tokens come from `s3://<bucket>/config/write-tokens` on the instances (`KB_TOKENS_SOURCE=s3`, deviation 8), SSM `/kb/write-tokens` by default, or `KB_WRITE_TOKENS` locally.
 
@@ -82,7 +85,7 @@ Virtualenv at `.venv`; install with `pip install -e '.[dev]'`.
 | `KB_EXTENSION_ORIGIN` | unset | `chrome-extension://<id>`, the only origin CORS allows (methods GET, POST, PATCH, DELETE; headers Authorization, Content-Type). Unset means no CORS headers at all. Set on the stack with the `ExtensionOrigin` parameter (`KB_EXTENSION_ORIGIN` for `infra/deploy.sh`) |
 | `KB_SEARCH_RATE` | `120/minute` | Search rate limit per client address (raised from 30 in phase 24 so a class behind one campus NAT shares a workable budget; admission control, not this limit, protects against overload), one shared budget for `GET /api/search`, the UI search pages and the MCP `search` tool (stdio is unlimited). Over the limit: HTTP 429, or the tool error "Rate limit exceeded, try again in a minute". A malformed value stops startup |
 | `KB_PROXY_HOPS` | `0` | Number of proxies in front of the app that each append to `X-Forwarded-For` (2 behind CloudFront and the ALB, set in the instance user data). The client address is the entry that many places from the right; `0` ignores the header. uvicorn's own proxy handling is off |
-| `KB_METRICS_MODE` | `emf` | `emf`, `api` or `off`. `api` sends search metrics with `put_metric_data` instead of EMF log lines; `off` publishes nothing and starts no sender (a plain "search metrics" log line only). The stack parameter `MetricsMode` defaults to `off` because the sandbox instance role cannot publish metrics |
+| `KB_METRICS_MODE` | `emf` | `emf`, `api` or `off`. `api` sends search metrics with `put_metric_data` instead of EMF log lines; `off` publishes nothing and starts no sender (a plain "search metrics" log line only). The stack parameter `MetricsMode` defaults to `off` because the sandbox instance role cannot publish metrics; the `KbMcp` and `CWAgent` alarms and the `kb-mcp-search` dashboard exist only when it is not `off` (phase 25.6) |
 | `KB_TEST_DATABASE_URL` | unset | **Test only.** A scratch PostgreSQL database for the tests (their tables are emptied before each test). Unset skips the PostgreSQL legs |
 | `KB_FAKE_MODELS` | unset | **Test only.** `1` swaps in the doubles from `tests/fakes.py` for the real models (inert unless `tests/` is importable, so inert in the image). Never set it in a deployment |
 

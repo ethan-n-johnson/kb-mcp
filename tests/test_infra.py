@@ -14,8 +14,10 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -343,6 +345,21 @@ def test_the_app_keeps_idle_connections_open_longer_than_the_alb_does(resources:
     assert int(match.group(1)) > idle
 
 
+def test_the_load_balancer_checks_liveness_and_the_boot_waits_for_readiness(resources: dict[str, Any]) -> None:
+    """Phase 25.3: the ALB uses /livez (no database), the boot signal still waits for /healthz."""
+    (tg,) = of_type(resources, "AWS::ElasticLoadBalancingV2::TargetGroup").values()
+    props = tg["Properties"]
+    assert props["HealthCheckPath"] == "/livez"
+    assert props["Matcher"] == {"HttpCode": "200"}
+    # Three missed checks 15 s apart: a busy instance gets 45 s before it is marked unhealthy.
+    assert (props["HealthCheckIntervalSeconds"], props["UnhealthyThresholdCount"]) == (15, 3)
+    (asg,) = of_type(resources, "AWS::AutoScaling::AutoScalingGroup").values()
+    assert asg["Properties"]["HealthCheckType"] == "ELB"
+    rendered = render_user_data(resources)
+    assert "curl -sf http://localhost:8000/healthz" in rendered
+    assert "/livez" not in rendered
+
+
 def test_outputs(app: dict[str, Any]) -> None:
     out = app["Outputs"]
     assert out["DistributionDomainName"]["Value"] == {"Fn::GetAtt": ["Distribution", "DomainName"]}
@@ -364,19 +381,38 @@ def alarms(resources: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return found
 
 
-SIX_ALARMS = {
-    "kb-keyword-mode",
+# Phase 25.6: alarms on metrics AWS publishes itself, so they get data with the sandbox role.
+AWS_METRIC_ALARMS = {
     "kb-unhealthy-host",
     "kb-no-healthy-host",
     "kb-5xx",
-    "kb-high-latency",
-    "kb-memory",
+    "kb-elb-5xx",
+    "kb-response-time",
+    "kb-capacity-short",
+    "kb-cpu",
 }
+POSTGRES_ALARMS = {"kb-capacity-max", "kb-db-cpu", "kb-db-connections", "kb-db-storage"}
+# Custom metrics (KbMcp, CWAgent): only when the instance role may publish them.
+CUSTOM_METRIC_ALARMS = {"kb-keyword-mode", "kb-high-latency", "kb-memory"}
 
 
-def test_exactly_the_six_alarms_exist_in_sqlite_mode_and_seven_in_postgres_mode(app: dict[str, Any]) -> None:
-    assert set(alarms(deployed(app, "sqlite"))) == SIX_ALARMS
-    assert set(alarms(deployed(app, "postgres"))) == SIX_ALARMS | {"kb-capacity-max"}
+@pytest.mark.parametrize("metrics_mode", ["off", "api", "emf"])
+def test_the_alarm_set_per_database_mode_and_metrics_mode(app: dict[str, Any], metrics_mode: str) -> None:
+    custom = CUSTOM_METRIC_ALARMS if metrics_mode != "off" else set()
+    assert set(alarms(deployed(app, "sqlite", metrics_mode))) == AWS_METRIC_ALARMS | custom
+    assert set(alarms(deployed(app, "postgres", metrics_mode))) == AWS_METRIC_ALARMS | POSTGRES_ALARMS | custom
+
+
+def test_with_the_default_metrics_mode_no_alarm_reads_a_custom_namespace(app: dict[str, Any]) -> None:
+    """The sandbox role cannot publish KbMcp or CWAgent metrics; such alarms would stay OK forever."""
+    assert app["Parameters"]["MetricsMode"]["Default"] == "off"
+    for mode in ("sqlite", "postgres"):
+        for name, alarm in alarms(deployed(app, mode)).items():
+            namespaces = {alarm.get("Namespace")} | {
+                m["MetricStat"]["Metric"]["Namespace"] for m in alarm.get("Metrics", []) if "MetricStat" in m
+            }
+            namespaces.discard(None)
+            assert namespaces and all(ns.startswith("AWS/") for ns in namespaces), (mode, name, namespaces)
 
 
 def test_every_alarm_notifies_the_topic_on_alarm_and_on_ok(resources: dict[str, Any]) -> None:
@@ -404,6 +440,20 @@ def test_alarm_thresholds_match_the_phase_file(resources: dict[str, Any]) -> Non
     assert shape(a["kb-5xx"]) == ("Sum", 300, 1, None, 5, gte, "notBreaching")
     assert shape(a["kb-memory"]) == ("Average", 300, 2, 2, 85, gt, "notBreaching")
     assert shape(a["kb-capacity-max"]) == ("Maximum", 60, 1, None, 4, gte, "notBreaching")
+    assert shape(a["kb-elb-5xx"]) == ("Sum", 300, 1, None, 5, gte, "notBreaching")
+    assert shape(a["kb-db-cpu"]) == ("Average", 300, 3, 3, 80, gt, "missing")
+    assert shape(a["kb-db-connections"]) == ("Maximum", 300, 2, 2, 60, gt, "missing")
+    assert shape(a["kb-db-storage"]) == ("Minimum", 300, 2, 2, 2 * 1024**3, lt, "missing")
+    response = a["kb-response-time"]
+    assert (response["ExtendedStatistic"], response["Period"], response["EvaluationPeriods"]) == ("p90", 300, 2)
+    assert (response["DatapointsToAlarm"], response["Threshold"], response["ComparisonOperator"]) == (2, 6, gt)
+    assert response["TreatMissingData"] == "notBreaching" and "Statistic" not in response
+    assert shape(a["kb-cpu"]) == ("Average", 300, 3, 3, 85, gt, "missing")
+    assert (a["kb-cpu"]["Namespace"], a["kb-cpu"]["MetricName"]) == ("AWS/EC2", "CPUUtilization")
+    assert dims(a["kb-cpu"]) == {"AutoScalingGroupName": {"Ref": "AppAsg"}}
+    short = a["kb-capacity-short"]
+    assert (short["EvaluationPeriods"], short["DatapointsToAlarm"], short["Threshold"]) == (15, 15, 1)
+    assert (short["ComparisonOperator"], short["TreatMissingData"]) == (gte, "missing")
     latency = a["kb-high-latency"]
     assert (latency["ExtendedStatistic"], latency["Period"], latency["EvaluationPeriods"]) == ("p90", 300, 1)
     assert (latency["Threshold"], latency["ComparisonOperator"], latency["TreatMissingData"]) == (2000, gt, "notBreaching")
@@ -419,6 +469,47 @@ def test_elb_alarms_use_the_stack_s_own_target_group_and_load_balancer(resources
         assert dims(a[name]) == {"TargetGroup": tg, "LoadBalancer": lb}
     assert a["kb-5xx"]["MetricName"] == "HTTPCode_Target_5XX_Count"
     assert dims(a["kb-5xx"]) == {"LoadBalancer": lb}
+    assert (a["kb-elb-5xx"]["Namespace"], a["kb-elb-5xx"]["MetricName"]) == ("AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count")
+    assert dims(a["kb-elb-5xx"]) == {"LoadBalancer": lb}
+    assert (a["kb-response-time"]["Namespace"], a["kb-response-time"]["MetricName"]) == (
+        "AWS/ApplicationELB", "TargetResponseTime",
+    )
+    assert dims(a["kb-response-time"]) == {"LoadBalancer": lb}
+
+
+def test_rds_alarms_read_the_kb_db_instance(resources: dict[str, Any]) -> None:
+    a = alarms(resources)
+    db_id = {"Fn::ImportValue": "kb-DbInstanceId"}
+    db_exports = {o["Export"]["Name"] for o in load("db.yaml")["Outputs"].values()}
+    assert "kb-DbInstanceId" in db_exports
+    for name, metric in (
+        ("kb-db-cpu", "CPUUtilization"), ("kb-db-connections", "DatabaseConnections"), ("kb-db-storage", "FreeStorageSpace"),
+    ):
+        assert (a[name]["Namespace"], a[name]["MetricName"]) == ("AWS/RDS", metric)
+        assert dims(a[name]) == {"DBInstanceIdentifier": db_id}
+    for logical, res in resources.items():
+        if "ImportValue" in json.dumps(res) and "kb-DbInstanceId" in json.dumps(res):
+            assert res.get("Condition") == "UsePostgres", logical
+
+
+def test_capacity_short_alarm_is_desired_minus_in_service(resources: dict[str, Any]) -> None:
+    metrics_ = {m["Id"]: m for m in alarms(resources)["kb-capacity-short"]["Metrics"]}
+    assert metrics_["shortfall"]["Expression"] == "desired - inservice" and metrics_["shortfall"]["ReturnData"] is True
+    for metric_id, name in (("desired", "GroupDesiredCapacity"), ("inservice", "GroupInServiceInstances")):
+        stat = metrics_[metric_id]["MetricStat"]
+        assert metrics_[metric_id]["ReturnData"] is False
+        assert (stat["Metric"]["Namespace"], stat["Metric"]["MetricName"]) == ("AWS/AutoScaling", name)
+        assert stat["Metric"]["Dimensions"] == [{"Name": "AutoScalingGroupName", "Value": {"Ref": "AppAsg"}}]
+        assert stat["Period"] == 60
+    # Both metrics are collected, or the alarm would never get data.
+    collected = resources["AppAsg"]["Properties"]["MetricsCollection"][0]["Metrics"]
+    assert {"GroupDesiredCapacity", "GroupInServiceInstances"} <= set(collected)
+
+
+def test_every_template_fits_the_inline_template_size_limit() -> None:
+    """validate-template --template-body and deploy --template-file without --s3-bucket stop at 51,200 bytes."""
+    for path in INFRA.glob("*.yaml"):
+        assert path.stat().st_size < 51_200 - 1_024, (path.name, path.stat().st_size)
 
 
 def emitted_metrics() -> tuple[str, set[str], list[list[str]]]:
@@ -481,17 +572,31 @@ def test_alarms_that_the_demo_triggers_say_so(resources: dict[str, Any]) -> None
         assert "on purpose" not in a[name]["AlarmDescription"], name
 
 
-def test_dashboard_body_is_valid_json(resources: dict[str, Any]) -> None:
-    body, variables = resources["Dashboard"]["Properties"]["DashboardBody"]["Fn::Sub"]
+def dashboard_widgets(resource: dict[str, Any]) -> list[dict[str, Any]]:
+    body, variables = resource["Properties"]["DashboardBody"]["Fn::Sub"]
     text = body
     for name in variables:
         text = text.replace("${" + name + "}", f"value-{name}")
     text = text.replace("${AWS::Region}", "us-east-1")
     assert "${" not in text
-    widgets = json.loads(text)["widgets"]
-    assert len(widgets) == 4
-    metric_names = {m[1] for w in widgets for m in w["properties"]["metrics"]}
-    assert metric_names == {"LatencyMs", "HealthyHostCount", "UnHealthyHostCount", "mem_used_percent"}
+    return json.loads(text)["widgets"]
+
+
+def test_dashboards_are_valid_json_and_read_metrics_that_exist(resources: dict[str, Any]) -> None:
+    def names(logical: str) -> set[str]:
+        return {m[1] for w in dashboard_widgets(resources[logical]) for m in w["properties"]["metrics"]}
+
+    # The main dashboard reads only AWS-published metrics, so it has data with the sandbox role.
+    assert names("Dashboard") == {
+        "RequestCount", "HTTPCode_Target_5XX_Count", "HTTPCode_ELB_5XX_Count", "TargetResponseTime",
+        "HealthyHostCount", "UnHealthyHostCount", "GroupDesiredCapacity", "GroupInServiceInstances", "CPUUtilization",
+    }
+    namespaces = {m[0] for w in dashboard_widgets(resources["Dashboard"]) for m in w["properties"]["metrics"]}
+    assert namespaces == {"AWS/ApplicationELB", "AWS/AutoScaling", "AWS/EC2"}
+    assert resources["DbDashboard"]["Condition"] == "UsePostgres"
+    assert names("DbDashboard") == {"CPUUtilization", "DatabaseConnections", "FreeStorageSpace"}
+    assert resources["SearchDashboard"]["Condition"] == "PublishesMetrics"
+    assert names("SearchDashboard") == {"LatencyMs", "mem_used_percent"}
 
 
 # --- phase 12: S3 lifecycle ---------------------------------------------------------------
@@ -638,7 +743,7 @@ def test_service_container_gets_the_url_source_only_through_db_opts(resources: d
 
 def test_nightly_job_exports_in_postgres_mode(resources: dict[str, Any]) -> None:
     rendered = render_user_data(resources)
-    assert "docker exec kb python -m kb.cli export-sqlite >> /var/log/kb-backup.log 2>&1" in rendered
+    assert "docker exec kb python -m kb.cli export-sqlite --once-per 3600 >> /var/log/kb-backup.log 2>&1" in rendered
     assert "docker exec kb python -m kb.cli backup >> /var/log/kb-backup.log 2>&1" in rendered
 
 
@@ -1242,6 +1347,24 @@ def test_up_save_downloads_the_snapshot(up_env: dict[str, Path]) -> None:
     assert result.returncode == 0, result.stderr
     assert (up_env["config"] / "kb-latest.db.gz").read_bytes() == b"latest db"
     assert not [c for c in up_calls(up_env) if c.startswith(("deploy.sh", "push-image.sh"))]
+    (dated,) = (up_env["config"] / "saved").glob("kb-*.db.gz")
+    assert re.fullmatch(r"kb-\d{8}T\d{6}Z\.db\.gz", dated.name) and dated.read_bytes() == b"latest db"
+
+
+def test_up_save_keeps_the_newest_fourteen_dated_copies(up_env: dict[str, Path]) -> None:
+    """Phase 25.5: a bad save never replaces the only good laptop copy."""
+    (up_env["state"] / "stack-kb-data").write_text("CREATE_COMPLETE\n", encoding="utf-8")
+    (up_env["state"] / "obj-snapshots_kb-latest.db.gz").write_bytes(b"latest db")
+    saved = up_env["config"] / "saved"
+    saved.mkdir()
+    for day in range(1, 17):
+        (saved / f"kb-202610{day:02d}T000000Z.db.gz").write_bytes(b"old")
+    assert run_up(up_env, "save").returncode == 0
+    names = sorted(p.name for p in saved.glob("kb-*.db.gz"))
+    # The new copy plus the 13 newest old ones (days 4 to 16); days 1 to 3 are gone.
+    assert len(names) == 14
+    assert names[:13] == [f"kb-202610{day:02d}T000000Z.db.gz" for day in range(4, 17)]
+    assert (saved / names[13]).read_bytes() == b"latest db"
 
 
 # A stub curl: records its arguments and what arrived on stdin (the config that carries the token),
@@ -1357,12 +1480,15 @@ def resolve(node: Any, template: dict[str, Any], mode: str) -> Any:
     return out
 
 
-def deployed(app: dict[str, Any], mode: str) -> dict[str, Any]:
-    """The resources that exist in `mode` (conditions applied), with `DatabaseMode` resolved."""
-    kept = {
-        name: res for name, res in app["Resources"].items()
-        if res.get("Condition") in (None, "UsePostgres" if mode == "postgres" else None)
-    }
+def deployed(app: dict[str, Any], mode: str, metrics_mode: str = "off") -> dict[str, Any]:
+    """The resources that exist in `mode` and `metrics_mode` (conditions applied), with `DatabaseMode` resolved."""
+    true = {None}
+    if mode == "postgres":
+        true.add("UsePostgres")
+    if metrics_mode != "off":
+        true.add("PublishesMetrics")
+    assert set(app["Conditions"]) == {"UsePostgres", "PublishesMetrics"}
+    kept = {name: res for name, res in app["Resources"].items() if res.get("Condition") in true}
     return resolve(kept, app, mode)
 
 
@@ -1382,7 +1508,10 @@ def test_sqlite_mode_keeps_the_phase_1_group(app: dict[str, Any]) -> None:
         "min": 1, "max": 1, "desired": 1, "in_service": 0, "batch": 1, "wait": True, "signals": 1,
     }
     resources = deployed(app, "sqlite")
-    assert "MetricsCollection" not in resources["AppAsg"]["Properties"]
+    # Group metrics are collected in both modes (kb-capacity-short reads them).
+    assert resources["AppAsg"]["Properties"]["MetricsCollection"] == [
+        {"Granularity": "1Minute", "Metrics": ["GroupInServiceInstances", "GroupDesiredCapacity"]}
+    ]
     assert not of_type(resources, "AWS::AutoScaling::ScalingPolicy")
     assert "CapacityMaxAlarm" not in resources and "kb-capacity-max" not in alarms(resources)
 
@@ -1408,7 +1537,7 @@ def test_no_mode_can_exceed_four_instances(app: dict[str, Any]) -> None:
 def test_postgres_mode_collects_the_in_service_metric_for_the_capacity_alarm(app: dict[str, Any]) -> None:
     resources = deployed(app, "postgres")
     assert resources["AppAsg"]["Properties"]["MetricsCollection"] == [
-        {"Granularity": "1Minute", "Metrics": ["GroupInServiceInstances"]}
+        {"Granularity": "1Minute", "Metrics": ["GroupInServiceInstances", "GroupDesiredCapacity"]}
     ]
     alarm = alarms(resources)["kb-capacity-max"]
     assert (alarm["Namespace"], alarm["MetricName"]) == ("AWS/AutoScaling", "GroupInServiceInstances")
@@ -1503,21 +1632,34 @@ def test_db_client_group_is_empty(db: dict[str, Any]) -> None:
 def test_db_instance_settings(db: dict[str, Any]) -> None:
     instance = db["Resources"]["Db"]
     props = instance["Properties"]
-    assert instance["DeletionPolicy"] == "Delete" and instance["UpdateReplacePolicy"] == "Delete"
+    # Phase 25.5: a final snapshot whenever CloudFormation deletes or replaces the database.
+    assert instance["DeletionPolicy"] == "Snapshot" and instance["UpdateReplacePolicy"] == "Snapshot"
     assert props["Engine"] == "postgres"
     assert props["DBName"] == "kb" and props["MasterUsername"] == "kbadmin"
     assert props["AllocatedStorage"] == "20" and props["StorageType"] == "gp2"
     assert props["PubliclyAccessible"] is False
     assert props["MultiAZ"] == {"Ref": "MultiAz"}
     assert props["StorageEncrypted"] == {"Ref": "StorageEncrypted"}
-    assert props["BackupRetentionPeriod"] == 1 and props["DeletionProtection"] is False
+    assert props["BackupRetentionPeriod"] == {"Ref": "BackupRetentionDays"}
+    assert props["DeletionProtection"] == {"Ref": "DeletionProtection"}
+    assert props["CopyTagsToSnapshot"] is True
+    # The backup window ends before the nightly export (07:15 UTC) and the maintenance window does not overlap it.
+    assert props["PreferredBackupWindow"] == "06:00-06:30"
+    assert props["PreferredMaintenanceWindow"] == "sun:08:00-sun:08:30"
     assert props["VPCSecurityGroups"] == [{"Fn::GetAtt": ["DbSg", "GroupId"]}]
     assert props["MasterUserPassword"] == {"Ref": "DbPassword"}
 
 
 def test_db_parameters(db: dict[str, Any]) -> None:
     params = db["Parameters"]
-    assert set(params) == {"DbInstanceClass", "EngineVersion", "MultiAz", "DbPassword", "StorageEncrypted"}
+    assert set(params) == {
+        "DbInstanceClass", "EngineVersion", "MultiAz", "DbPassword", "StorageEncrypted",
+        "BackupRetentionDays", "DeletionProtection",
+    }
+    days = params["BackupRetentionDays"]
+    assert (days["Type"], days["Default"], days["MinValue"], days["MaxValue"]) == ("Number", 7, 1, 35)
+    assert params["DeletionProtection"]["Default"] == "true"
+    assert params["DeletionProtection"]["AllowedValues"] == ["true", "false"]
     password = params["DbPassword"]
     assert password["NoEcho"] is True and "Default" not in password
     assert (password["MinLength"], password["MaxLength"]) == (16, 64)
@@ -1543,7 +1685,11 @@ def test_db_stack_imports_what_the_network_stack_exports(db: dict[str, Any]) -> 
 
 def test_db_outputs_and_exports(db: dict[str, Any]) -> None:
     exports = {name: o["Export"]["Name"] for name, o in db["Outputs"].items()}
-    assert exports == {"DbEndpoint": "kb-DbEndpoint", "DbPort": "kb-DbPort", "DbClientSg": "kb-DbClientSg"}
+    assert exports == {
+        "DbEndpoint": "kb-DbEndpoint", "DbPort": "kb-DbPort", "DbClientSg": "kb-DbClientSg",
+        "DbInstanceId": "kb-DbInstanceId",
+    }
+    assert db["Outputs"]["DbInstanceId"]["Value"] == {"Ref": "Db"}
 
 
 def test_no_password_is_written_in_the_repo_templates_or_scripts() -> None:
@@ -1581,12 +1727,13 @@ def test_deploy_db_passes_the_overrides_that_are_set(stub_bin: Path) -> None:
     env = {
         "KB_DB_PASSWORD": DB_PASSWORD, "KB_DB_CLASS": "db.t3.small", "KB_DB_VERSION": "16.9",
         "KB_DB_MULTI_AZ": "false", "KB_DB_ENCRYPTED": "false",
+        "KB_DB_BACKUP_DAYS": "3", "KB_DB_DELETION_PROTECTION": "false",
     }
     run_script(DEPLOY, ["db"], stub_bin, env)
     deploy = next(c for c in calls(stub_bin) if "cloudformation deploy" in c)
     assert deploy.split("--parameter-overrides", 1)[1].split() == [
         f"DbPassword={DB_PASSWORD}", "DbInstanceClass=db.t3.small", "EngineVersion=16.9",
-        "MultiAz=false", "StorageEncrypted=false",
+        "MultiAz=false", "StorageEncrypted=false", "BackupRetentionDays=3", "DeletionProtection=false",
     ]
 
 
@@ -1772,3 +1919,196 @@ def test_class_capacity_status_reads_only(tmp_path: Path) -> None:
     assert changing == []
     assert any("describe-target-health" in c for c in calls(bin_dir))
     assert any("describe-scheduled-actions" in c for c in calls(bin_dir))
+
+
+# --- infra/teardown-db.sh (phase 25.5) -----------------------------------------------------
+
+TEARDOWN_DB = INFRA / "teardown-db.sh"
+
+# A stub aws for teardown-db.sh: stacks exist when $state/stack-<name> exists; the
+# instance's protection is $state/protected (True or False); a failed wait when
+# $state/delete-fails exists.
+AWS_TEARDOWN_STUB = r"""
+echo "aws $*" >> {log}
+case "$1 $2" in
+  "cloudformation describe-stacks")
+    for a in "$@"; do last="$a"; done
+    [ -f "{state}/stack-$last" ] || exit 254 ;;
+  "cloudformation describe-stack-resource") echo "kb-db-db-abc123" ;;
+  "rds describe-db-instances") cat "{state}/protected" ;;
+  "rds modify-db-instance")
+    case " $* " in *" --no-deletion-protection "*) echo False > "{state}/protected" ;; *) echo True > "{state}/protected" ;; esac ;;
+  "cloudformation wait") [ ! -f "{state}/delete-fails" ] || exit 255 ;;
+  "rds describe-db-snapshots") echo "rds:kb-db-final 2026-11-08T12:00:00Z available" ;;
+esac
+exit 0
+"""
+
+
+@pytest.fixture
+def teardown_env(tmp_path: Path) -> dict[str, Path]:
+    state, bin_dir, config = tmp_path / "state", tmp_path / "bin", tmp_path / "config"
+    for d in (state, bin_dir, config):
+        d.mkdir()
+    log = tmp_path / "calls.log"
+    make_stub(bin_dir, "aws", AWS_TEARDOWN_STUB.format(log=log, state=state))
+    (state / "stack-kb-db").write_text("", encoding="utf-8")
+    (state / "protected").write_text("True\n", encoding="utf-8")
+    db_file = tmp_path / "kb.db"
+    conn = sqlite3.connect(db_file)
+    conn.executescript("CREATE TABLE docs(id INTEGER); CREATE TABLE chunks(id INTEGER); INSERT INTO docs VALUES (1);")
+    conn.close()
+    (config / "kb-latest.db.gz").write_bytes(gzip.compress(db_file.read_bytes()))
+    return {"state": state, "bin": bin_dir, "config": config, "log": log}
+
+
+def run_teardown(env: dict[str, Path], answer: str = "kb-db\n", **extra: str) -> subprocess.CompletedProcess[str]:
+    base = {"PATH": f"{env['bin']}:/usr/bin:/bin", "HOME": str(env["config"].parent), "KB_CONFIG_DIR": str(env["config"])}
+    return subprocess.run(
+        ["bash", str(TEARDOWN_DB)], input=answer, capture_output=True, text=True, env=base | extra, timeout=60,
+    )
+
+
+def teardown_calls(env: dict[str, Path]) -> list[str]:
+    return env["log"].read_text(encoding="utf-8").splitlines() if env["log"].exists() else []
+
+
+def test_teardown_db_turns_protection_off_then_deletes_and_lists_the_final_snapshot(teardown_env: dict[str, Path]) -> None:
+    result = run_teardown(teardown_env)
+    assert result.returncode == 0, result.stderr
+    log = teardown_calls(teardown_env)
+    modify = next(i for i, c in enumerate(log) if "rds modify-db-instance" in c)
+    delete = next(i for i, c in enumerate(log) if "cloudformation delete-stack" in c)
+    assert modify < delete
+    assert "--no-deletion-protection" in log[modify] and "--db-instance-identifier kb-db-db-abc123" in log[modify]
+    assert "integrity ok, 1 docs, 0 chunks" in result.stdout
+    assert "rds:kb-db-final" in result.stdout
+
+
+def test_teardown_db_refuses_while_kb_app_exists(teardown_env: dict[str, Path]) -> None:
+    (teardown_env["state"] / "stack-kb-app").write_text("", encoding="utf-8")
+    result = run_teardown(teardown_env)
+    assert result.returncode == 1 and "kb-app still exists" in result.stderr
+    assert not [c for c in teardown_calls(teardown_env) if "delete-stack" in c or "modify-db-instance" in c]
+
+
+def test_teardown_db_refuses_without_a_fresh_laptop_copy(teardown_env: dict[str, Path]) -> None:
+    copy = teardown_env["config"] / "kb-latest.db.gz"
+    old = time.time() - 2 * 3600
+    os.utime(copy, (old, old))
+    result = run_teardown(teardown_env)
+    assert result.returncode == 1 and "older than 60 minutes" in result.stderr
+    copy.unlink()
+    result = run_teardown(teardown_env)
+    assert result.returncode == 1 and "no laptop copy" in result.stderr
+    assert not [c for c in teardown_calls(teardown_env) if "delete-stack" in c or "modify-db-instance" in c]
+
+
+def test_teardown_db_refuses_a_damaged_laptop_copy(teardown_env: dict[str, Path]) -> None:
+    (teardown_env["config"] / "kb-latest.db.gz").write_bytes(gzip.compress(b"not a database"))
+    result = run_teardown(teardown_env)
+    assert result.returncode == 1 and "failed its check" in result.stderr
+    assert not [c for c in teardown_calls(teardown_env) if "delete-stack" in c]
+
+
+def test_teardown_db_does_nothing_unless_the_stack_name_is_typed(teardown_env: dict[str, Path]) -> None:
+    result = run_teardown(teardown_env, answer="yes\n")
+    assert result.returncode == 1 and "Aborted" in result.stdout
+    assert not [c for c in teardown_calls(teardown_env) if "delete-stack" in c or "modify-db-instance" in c]
+    assert (teardown_env["state"] / "protected").read_text().strip() == "True"
+
+
+def test_teardown_db_turns_protection_back_on_when_the_delete_fails(teardown_env: dict[str, Path]) -> None:
+    (teardown_env["state"] / "delete-fails").write_text("", encoding="utf-8")
+    result = run_teardown(teardown_env)
+    assert result.returncode == 1 and "delete of kb-db failed" in result.stderr
+    assert (teardown_env["state"] / "protected").read_text().strip() == "True"
+
+
+def test_teardown_db_with_protection_already_off_skips_the_modify(teardown_env: dict[str, Path]) -> None:
+    (teardown_env["state"] / "protected").write_text("False\n", encoding="utf-8")
+    assert run_teardown(teardown_env).returncode == 0
+    assert not [c for c in teardown_calls(teardown_env) if "modify-db-instance" in c]
+
+
+def test_teardown_db_without_the_stack_exits_zero(teardown_env: dict[str, Path]) -> None:
+    (teardown_env["state"] / "stack-kb-db").unlink()
+    result = run_teardown(teardown_env)
+    assert result.returncode == 0 and "Nothing to delete" in result.stdout
+
+
+# --- infra/restore-test-db.sh (phase 25.5) -------------------------------------------------
+
+RESTORE_TEST = INFRA / "restore-test-db.sh"
+
+AWS_RESTORE_STUB = r"""
+echo "aws $*" >> {log}
+case " $* " in
+  *" list-exports "*)
+    case " $* " in
+      *kb-DbInstanceId*) echo "kb-db-db-abc123" ;; *kb-VpcId*) echo "vpc-1" ;;
+      *kb-PublicSubnetA*) echo "subnet-a" ;; *kb-PublicSubnetB*) echo "subnet-b" ;; esac ;;
+  *" rds describe-db-instances "*"LatestRestorableTime"*) echo "2026-11-08T12:00:00Z" ;;
+  *" rds describe-db-instances "*) cat "{state}/instances" 2>/dev/null || true ;;
+  *" describe-db-subnet-groups "*) exit 255 ;;
+  *" describe-security-groups "*) echo "None" ;;
+esac
+exit 0
+"""
+
+
+@pytest.fixture
+def restore_env(tmp_path: Path) -> dict[str, Path]:
+    state, bin_dir, config = tmp_path / "state", tmp_path / "bin", tmp_path / "config"
+    for d in (state, bin_dir, config):
+        d.mkdir()
+    log = tmp_path / "calls.log"
+    make_stub(bin_dir, "aws", AWS_RESTORE_STUB.format(log=log, state=state))
+    make_stub(bin_dir, "curl", 'echo "203.0.113.7"\n')
+    (config / "db-password").write_text("Abcd1234Efgh5678\n", encoding="utf-8")
+    return {"state": state, "bin": bin_dir, "config": config, "log": log}
+
+
+def run_restore_test(env: dict[str, Path], *args: str, answer: str = "") -> subprocess.CompletedProcess[str]:
+    base = {
+        "PATH": f"{env['bin']}:/usr/bin:/bin", "HOME": str(env["config"].parent),
+        "KB_CONFIG_DIR": str(env["config"]), "KB_PYTHON": "/bin/true",
+    }
+    return subprocess.run(
+        ["bash", str(RESTORE_TEST), *args], input=answer, capture_output=True, text=True, env=base, timeout=60,
+    )
+
+
+def test_restore_test_creates_nothing_without_the_typed_confirmation(restore_env: dict[str, Path]) -> None:
+    result = run_restore_test(restore_env, answer="yes\n")
+    assert result.returncode == 1 and "Aborted" in result.stdout
+    assert "source (read only):    kb-db-db-abc123" in result.stdout and "203.0.113.7/32" in result.stdout
+    log = restore_env["log"].read_text(encoding="utf-8")
+    for verb in ("create-", "restore-", "delete-", "modify-", "authorize-"):
+        assert verb not in log, verb
+    assert "Abcd1234Efgh5678" not in result.stdout + result.stderr
+
+
+def test_restore_test_cleanup_never_deletes_an_instance_outside_its_prefix(restore_env: dict[str, Path]) -> None:
+    (restore_env["state"] / "instances").write_text("kb-db-db-abc123\n", encoding="utf-8")
+    result = run_restore_test(restore_env, "--cleanup")
+    assert result.returncode == 1 and "refusing to delete kb-db-db-abc123" in result.stderr
+    assert "delete-db-instance" not in restore_env["log"].read_text(encoding="utf-8")
+
+
+def test_restore_test_cleanup_deletes_its_own_copy_without_a_final_snapshot(restore_env: dict[str, Path]) -> None:
+    (restore_env["state"] / "instances").write_text("kb-restore-test-20261108120000\n", encoding="utf-8")
+    result = run_restore_test(restore_env, "--cleanup")
+    assert result.returncode == 0, result.stderr
+    delete = next(c for c in restore_env["log"].read_text(encoding="utf-8").splitlines() if "delete-db-instance" in c)
+    assert "--db-instance-identifier kb-restore-test-20261108120000" in delete
+    assert "--skip-final-snapshot" in delete
+
+
+def test_restore_test_never_names_the_source_in_a_write_call() -> None:
+    """The only calls that take the source identifier are the read and the restore's --source flag."""
+    text = RESTORE_TEST.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if "SOURCE_ID" in line and re.search(r"\b(delete|modify|stop|reboot)-db-instance\b", line):
+            raise AssertionError(line)
+    assert '--source-db-instance-identifier "$SOURCE_ID"' in text

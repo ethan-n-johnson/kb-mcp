@@ -66,6 +66,15 @@ Phase 1 (00 to 16, plus the upload links) is the working single-instance prototy
 | 23 | [Load test and scaling evidence](23-load-test.md) | Tue Nov 10 | laptop + AWS | 22 | run Locust, screenshots | 2nd: a short curl loop instead of Locust |
 | 23a | [Health check and admission control under load](23a-health-under-load.md) | done Nov 6 | laptop + AWS | 23 | run Locust | |
 | 24 | [Final README, extension, submission](24-final-wrap.md) | Wed Nov 11 to Thu Nov 12 | local + AWS | 23, 23a | extension, run3 Locust (50 users), MCP write decision, rehearsal, video | 1st: extension; 3rd: full DEMO.md |
+| 25 | [Product priorities: shared search, scale-out, health, auth, backups, alarms](25-product-priorities.md) | done locally Nov 8 (not deployed) | local, then AWS (approval needed) | 24 | approve deploys and the restore test, confirm SNS email | |
+| 26 | Data safety and local test gaps (planned) | not started | local | 25 | approve start | |
+| 27 | Deployment readiness (planned) | not started | local, read-only AWS | 25 | enable Docker in WSL; approve a CI run | |
+| 28 | Security hardening (planned, optional) | not started | local | 27 | decide scope | first to cut |
+| 29 | Live SQLite deployment and verification (planned) | not started | AWS (approval needed) | 26, 27 | fresh credentials, SNS email, MCP config | |
+| 30 | Temporary PostgreSQL session (planned, optional) | not started | AWS (approval needed) | 29 | approve each step, failover and restore test separately | cut before 29 |
+| 31 | Final documentation and presentation (planned) | not started | local | 29 | deck, rehearsal | |
+
+Phases 26 to 31 have no phase files yet; their scope, files, tests and completion criteria are in `docs/FINAL_PROJECT_ROADMAP.md` (section 7). Write each phase file when the phase is approved.
 
 Replanned Nov 6: 19 and 20 finished early (Oct 29), then a week passed, so there is no buffer day left. Submit Fri Nov 13. Phase 18 (the Lambda) is dropped: EventBridge is not on the sandbox list.
 

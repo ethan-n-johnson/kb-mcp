@@ -1,7 +1,9 @@
 """PostgreSQL store: a psycopg 3 pool, `?` placeholders, rows like `sqlite3.Row`.
 
 One `ConnectionPool` per database URL is shared by the whole process (min 1,
-max 5 connections). `open_postgres(url)` checks one connection out; `close()`
+max 5 connections). Each connection is checked with a round trip before it is
+handed out, so a connection left dead by an RDS failover is replaced instead
+of failing a request. `open_postgres(url)` checks one connection out; `close()`
 puts it back. Connections are in autocommit mode so statements outside
 `transaction()` commit at once, as they do on SQLite.
 
@@ -199,6 +201,12 @@ def get_pool(url: str) -> ConnectionPool:
                     "connect_timeout": CONNECT_TIMEOUT,
                 },
                 configure=_configure,
+                # A pooled connection can be dead after an RDS Multi-AZ failover
+                # or a network blip (the server side is gone, the client does not
+                # know yet). Checking it (one round trip) before handing it out
+                # lets the pool replace it, so the request gets a working
+                # connection instead of failing once per stale connection.
+                check=ConnectionPool.check_connection,
                 open=False,
             )
             pool.open(wait=True, timeout=30)

@@ -167,6 +167,19 @@ def create_app(
     mount_mcp(app, mcp)
     _add_security(app)
 
+    @app.get("/livez")
+    async def livez() -> JSONResponse:
+        """Liveness: 200 whenever this process answers HTTP. The load balancer checks this.
+
+        It reads nothing: no database, no cache, no model, no worker thread, so
+        a database outage or an RDS failover (which `/healthz` reports as 503)
+        never makes the load balancer mark every instance unhealthy and the Auto
+        Scaling group replace them all. A process that is stuck or gone cannot
+        answer, and that is what the check is for. Readiness and diagnostics
+        stay on `/healthz`.
+        """
+        return JSONResponse({"status": "alive"})
+
     @app.get("/healthz")
     async def healthz(request: Request) -> JSONResponse:
         """Return 200 with status JSON whenever the database was readable within the last 60 s, else 503.

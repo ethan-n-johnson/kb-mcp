@@ -7,7 +7,7 @@ What the demo shows (`docs/DEMO.md`): searching the web UI and Claude Code over 
 - **12 MCP tools** for searching, adding, editing and uploading documents, over HTTP (`/mcp`) or stdio.
 - **Over HTTP the five read tools need no token; the seven write tools need a write token** (phase 24 decision, see Known limitations). The REST API, web UI and Chrome extension need a write token for writes too.
 - **One command deploys everything:** `infra/up.sh` builds the image and deploys the four stacks (`kb-network`, `kb-data`, `kb-db`, `kb-app`). `infra/up.sh save` backs up the database before the sandbox session ends.
-- **Students:** `docs/STUDENTS.md`. **Instructor runbook:** `docs/DEMO.md`. **Decisions and measurements:** `docs/PROGRESS.md`. **Security:** `docs/SECURITY_REVIEW.md`. **Setup detail for Linux and Windows:** `docs/SETUP.md`.
+- **Students:** `docs/STUDENTS.md`. **Instructor runbook:** `docs/DEMO.md`. **Decisions and measurements:** `docs/PROGRESS.md`. **Security:** `docs/SECURITY_REVIEW.md`. **Setup detail for Linux and Windows:** `docs/SETUP.md`. **Backups and recovery:** `docs/RECOVERY.md`. **Alarms:** `docs/ALARMS.md`. **Remaining work and phases 26 onward:** `docs/FINAL_PROJECT_ROADMAP.md`.
 
 ---
 
@@ -73,7 +73,7 @@ flowchart LR
   cw[CloudWatch alarms<br/>ALB health, 5xx, capacity] --> sns[SNS emails]
 ```
 
-Boot of an instance in `postgres` mode: install Docker, `docker load` the image from S3, import the S3 export into RDS only if the database is empty (`import-sqlite --if-empty`), start the container, load the models (about 3 minutes from launch to a healthy target on an idle stack, up to about 10 under load). Nightly at 07:15 UTC every instance runs `export-sqlite`; `infra/up.sh save` asks the app for a fresh export and downloads it.
+Boot of an instance in `postgres` mode: install Docker, `docker load` the image from S3, import the S3 export into RDS only if the database is empty (`import-sqlite --if-empty`), start the container, load the models (about 3 minutes from launch to a healthy target on an idle stack, up to about 10 under load). Nightly at 07:15 UTC every instance runs `export-sqlite --once-per 3600`, and the first to claim the run in the database exports while the others skip; `infra/up.sh save` asks the app for a fresh export and downloads it.
 
 ### The four stacks
 
@@ -271,17 +271,17 @@ cd ~/kb-mcp
 infra/up.sh                  # deploys what is missing, in order: network, data, tokens, database, image, app
 infra/up.sh save             # before the lab session ends: downloads the database to ~/.config/kb-mcp/kb-latest.db.gz
 infra/teardown-app.sh        # deletes kb-app only (asks you to type the stack name); data stays
+infra/teardown-db.sh         # deletes kb-db after checks (fresh laptop copy, kb-app gone); final snapshot kept
+infra/restore-test-db.sh     # proves RDS restores on a temporary copy, then deletes it (costs cents; ask first)
 infra/class-capacity.sh up   # 4 instances for class (postgres mode); see docs/DEMO.md
 infra/deploy.sh network|data|db|app [ImageTag]    # one stack by hand; infra/push-image.sh --build builds and uploads the image
 ```
 
 `infra/up.sh` is safe to run again at any time: unchanged stacks report "No changes to deploy". It prints the CloudFront domain at the end. The first deploy in a new account takes about 30 minutes (measured 2026-11-07 from an empty account: 26 minutes in all, of which `kb-db` about 15, the image build and upload about 3 and `kb-app` about 6; allow more for a slow network). After every deploy, run one warm-up search before anyone else does. In `postgres` mode `infra/up.sh save` first asks the app to export RDS to S3, then downloads the export.
 
-Delete `kb-db` only after `infra/up.sh save` succeeded, and only after `kb-app` is gone (it imports `kb-DbClientSg`):
+**Known gap (open, fix planned in phase 26):** `infra/up.sh save` replaces `~/.config/kb-mcp/kb-latest.db.gz` before it checks the download or keeps a copy of the old file, so a save from an empty or damaged bucket snapshot can overwrite the only good copy. Until it is fixed, copy the file elsewhere before saving and check the new one afterwards (`docs/RECOVERY.md`, "Known gap in `infra/up.sh save`").
 
-```bash
-aws cloudformation delete-stack --stack-name kb-db && aws cloudformation wait stack-delete-complete --stack-name kb-db
-```
+Delete `kb-db` only with `infra/teardown-db.sh`, after `infra/up.sh save` and `infra/teardown-app.sh` (`kb-app` imports `kb-DbClientSg`). Since phase 25.5 `kb-db` has deletion protection, 7 days of automated backups and a final snapshot on delete, so a plain `delete-stack` fails; the script checks the laptop copy, turns protection off, and deletes. Backup layers, recovery objectives and every restore procedure are in `docs/RECOVERY.md`.
 
 The next `infra/up.sh` recreates `kb-db` and `kb-app` and imports the saved database. Never delete `kb-network` or `kb-data` without asking. Check a deployment with `scripts/demo_check.sh "$CF"` (read only, PASS or FAIL per line).
 
@@ -334,7 +334,7 @@ See `CLAUDE.md` for the local web server, PostgreSQL mode and the environment va
 | Networking (VPC) | Custom VPC, public and private subnets in 2 AZs, route tables, internet gateway, one NAT gateway |
 | Connecting networks | S3 gateway endpoint so snapshots and the image never cross the NAT gateway; RDS reachable only through `kb-DbClientSg` |
 | Securing user and application access | Security group chaining (CloudFront prefix list, ALB, app, RDS), bearer write tokens kept in the private bucket (SSM is unreachable from the instance role), MCP write tools gated in the application |
-| Monitoring, elasticity, high availability | ALB health checks on `/healthz`; Auto Scaling group (min 2, max 4, CPU target 50 percent) replaces failed instances in either AZ; ALB and capacity alarms to SNS. Search-metric alarms exist but have no data (the sandbox role cannot publish metrics, `MetricsMode=off`) |
+| Monitoring, elasticity, high availability | ALB health checks on `/livez` (liveness, no database; `/healthz` is the readiness and diagnostics endpoint); Auto Scaling group (min 2, max 4, CPU target 50 percent) replaces failed instances in either AZ; ALB and capacity alarms to SNS. Search-metric alarms exist but have no data (the sandbox role cannot publish metrics, `MetricsMode=off`) |
 | Automating your architecture | All resources in CloudFormation, four stacks, `infra/up.sh` from an empty account, `cfn-lint` and `validate-template` before every deploy |
 | Caching content | CloudFront for HTTPS and caching of `/static/*`; API, UI pages and MCP pass through uncached |
 | Decoupled and serverless architectures | Not built. The weekly EventBridge and Lambda report was a stretch goal; EventBridge is not on the sandbox list |
@@ -432,16 +432,17 @@ Idle (both app and database stacks deleted) only S3 bills: the image tarball, sn
 
 ## Known limitations
 
-The full list is `docs/SECURITY_REVIEW.md` ("Known limitations", 23 items). The ones that matter for the demo and the class:
+The full list is `docs/SECURITY_REVIEW.md` ("Known limitations", 24 items). The ones that matter for the demo and the class:
 
 - **MCP writes need a token over HTTP; reads are public.** Decided 2026-11-07 (phase 24): the whole class gets the URL, so the seven write tools refuse a call without a valid bearer token, enforced in the app because IAM cannot gate anonymous HTTP clients. A claude.ai connector can therefore search but not write. Stdio is local and tokenless. Recovery from a bad write is the versioned S3 export and `import-sqlite`; run `infra/up.sh save` right before class.
 - **Reads are public.** Anyone with the CloudFront URL can read the whole knowledge base and the audit log.
 - **The search rate limit is per instance and per client address.** Default 120/minute; with 2 to 4 instances the effective limit is that times the instance count. One campus NAT shares one budget. Overload protection is admission control, not this limit.
 - **Capacity.** About 0.7 semantic searches per second per instance. When the class is busy, searches wait up to 5 s and are then answered by keyword search (`mode: keyword`). CPU-triggered scale-out takes minutes of load plus about 10 minutes per new instance under load, so raise capacity before class.
-- **Search-metric alarms have no data.** The sandbox role cannot publish metrics (`KB_METRICS_MODE=off`); the ALB alarms and SNS emails work. Container logs stay on the instance.
+- **No custom metrics in the sandbox.** The sandbox role cannot publish metrics (`KB_METRICS_MODE=off`), so since phase 25.6 the search-latency, keyword-mode and memory alarms are created only with `MetricsMode` api or emf. Monitoring uses AWS-published ALB, Auto Scaling, EC2 and RDS metrics instead (`docs/ALARMS.md`). Container logs stay on the instance.
 - **CloudFront to the ALB is plain HTTP** (no domain or certificate in the sandbox); bearer tokens instead of OAuth 2.1; no origin secret between CloudFront and the ALB; the instance role can read the whole account's S3.
 - **Occasional dropped connections** between the client and CloudFront were seen during deploys and failover drills (1 in 54 to 91 requests); the ALB counted no 5xx. Not explained (PROGRESS open issues).
 - **At 50 users (run3) almost every search is a keyword answer after a 5 s wait.** 4 instances serve about 0.7 semantic searches per second each; keyword search and RDS were not the limit (RDS at most 18 connections and 17 percent CPU).
+- **One NAT gateway, in AZ a.** If AZ a fails, instances in AZ b keep serving searches, but `ingest_url` fails and no replacement instance can boot until AZ a is back (`docs/SECURITY_REVIEW.md`, limitation 24). A second NAT gateway costs about 33 USD a month.
 - **Chrome extension: written, not yet tested in Chrome.**
 
 Scale-out path beyond this project: a custom domain with ACM on the ALB, MCP OAuth 2.1, a shared rate-limit counter (database, or CloudFront and WAF rules), a larger or faster model host, baking the models into the image so a new instance becomes healthy faster.
