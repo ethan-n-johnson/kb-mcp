@@ -25,7 +25,7 @@ Status words: not started, in progress, implemented (code written), tested (loca
 | 25.2 Scale-out | Implemented, tested and deployed in phases 22, 23, 23a | One nightly export per group, not one per instance; single NAT gateway documented | tested (SQLite legs; `pg` legs need `KB_TEST_DATABASE_URL`) |
 | 25.3 Health checks | `/healthz` only, and the ALB uses it; it returns 503 when the database is unreachable for 60 s | `/livez` for the ALB, `/healthz` stays the readiness check | tested (SQLite legs; `pg` legs need `KB_TEST_DATABASE_URL`) |
 | 25.4 Write auth | Implemented and tested in phase 24 (MCP), phases 05 to 16 (REST, UI) | Audit every write route and tool; fill test gaps only | tested (no code change needed; guard tests added) |
-| 25.5 Backups | 1 day RDS retention, `DeletionPolicy: Delete`, no deletion protection; S3 export nightly | Retention 7, snapshot on delete and replace, protection parameter, teardown script, probe, `docs/RECOVERY.md` | not started |
+| 25.5 Backups | 1 day RDS retention, `DeletionPolicy: Delete`, no deletion protection; S3 export nightly | Retention 7, snapshot on delete and replace, protection parameter, teardown script, probe, `docs/RECOVERY.md` | tested (templates and scripts with stubs); restore test not run (needs a deployed `kb-db` and approval) |
 | 25.6 Alarms | 3 of 7 alarms can never receive data | Conditional custom-metric alarms; ALB, Auto Scaling and RDS alarms; dashboard; runbook | not started |
 
 ## Live audit (2026-11-08, read only)
@@ -34,14 +34,14 @@ Account `834269865094` (AWS Academy Learner Lab, role `voclabs`), not the Cloud 
 
 - **Nothing of kb-mcp is deployed.** No `kb-*` stacks (the last were deleted 2026-10-16 and 2026-10-17), no RDS instances or snapshots, no Auto Scaling groups, load balancers, target groups, instances, NAT gateways, alarms, dashboards, CloudFront distributions or S3 buckets. Two confirmed email subscriptions remain on a `kb-alerts` topic that no longer exists.
 - So the deployed database mode, live metrics, target health and AZ spread cannot be verified in this account. Every "deployed" result in `docs/PROGRESS.md` for phases 19 to 24 is historical (account `983926826929`).
-- Permissions (IAM policy simulator; `aws:RequestedRegion=us-east-1` must be given, without it the simulator reports false explicit denies for RDS):
+- Permissions (IAM policy simulator). The context must carry what a real request carries: `aws:RequestedRegion=us-east-1`, and for RDS `rds:Piops=0` and `rds:StorageSize` (the lab policy denies provisioned IOPS and storage above a limit; 40 GB allowed, 200 GB denied). A missing key makes the simulator report a false explicit deny. `infra/probe-rds.sh` section 8 now passes them:
 
 | Action | Result |
 | --- | --- |
 | `rds:CreateDBInstance` (`db.t3.micro`, Multi-AZ, encrypted, 20 GB, postgres) | allowed |
 | `rds:CreateDBInstance` with `db.t3.large` | explicit deny |
-| `rds:ModifyDBInstance`, `RestoreDBInstanceToPointInTime`, `RestoreDBInstanceFromDBSnapshot`, `CreateDBSnapshot`, `DeleteDBInstance` | allowed |
-| `rds:CopyDBSnapshot`, `rds:DeleteDBSnapshot` | implicit deny (a final snapshot cannot be deleted by the lab user) |
+| `rds:ModifyDBInstance`, `RestoreDBInstanceToPointInTime`, `RestoreDBInstanceFromDBSnapshot`, `CreateDBSnapshot`, `DeleteDBInstance`, `DeleteDBSnapshot` (gp2, `Piops=0`, 20 GB) | allowed |
+| The same with `rds:Piops=1000` or `rds:StorageSize=200` | explicit deny |
 | Load balancers, target groups, Auto Scaling, launch templates, NAT gateway, `PutMetricAlarm`, `PutDashboard`, SNS create and subscribe, CloudFront, S3 | allowed |
 | `iam:PassRole` | `myS3Role` only |
 | `ec2:RunInstances` t3.medium, `myS3Role`, encrypted gp2 30 GB (`--dry-run`) | `DryRunOperation` (would succeed) |
@@ -106,9 +106,31 @@ Token handling: `check_token` compares every configured secret with `hmac.compar
 
 **Tests added (`tests/test_write_routes.py`):** the set of non-GET routes in the OpenAPI schema must equal the classified set (10 token-gated, 2 ticket-gated), so a new write route fails until it is classified; each of the 10 token-gated routes answers 401 to no token, a wrong token and a `Basic` header without echoing them, and the audit log, the doc count, the doc itself and the fallback toggle are unchanged; the upload route with an unknown ticket answers 404 `bad_ticket` and stores nothing.
 
-## 25.5 and 25.6
+## 25.5 Backups and recovery
 
-Filled in as each sub-phase is done.
+**Before:** `infra/db.yaml` had `BackupRetentionPeriod: 1`, `DeletionProtection: false`, `DeletionPolicy: Delete` and `UpdateReplacePolicy: Delete` (phase 19 chose them because a sandbox reset loses RDS anyway). Deleting `kb-db` destroyed the database and its backups; only the S3 export and the single laptop file remained, and `infra/up.sh save` overwrote that file each time.
+
+**Changes:**
+
+- `infra/db.yaml`: `BackupRetentionDays` parameter (default 7, 1 to 35), `DeletionProtection` parameter (default `true`), `DeletionPolicy: Snapshot` and `UpdateReplacePolicy: Snapshot`, `PreferredBackupWindow` 06:00 to 06:30 UTC (before the 07:15 export), `PreferredMaintenanceWindow` Sunday 08:00 to 08:30 UTC (must not overlap), `CopyTagsToSnapshot`, new export `kb-DbInstanceId` (teardown, restore test, RDS alarms in 25.6).
+- `infra/deploy.sh db`: `KB_DB_BACKUP_DAYS`, `KB_DB_DELETION_PROTECTION`.
+- `infra/teardown-db.sh` (new): refuses while `kb-app` exists or without a laptop copy younger than 60 minutes that passes `integrity_check`; typed confirmation; protection off, delete (final snapshot), protection back on if the delete fails.
+- `infra/up.sh save`: also keeps a dated copy in `~/.config/kb-mcp/saved/` (newest 14), so a bad save never replaces the only good copy.
+- `infra/probe-rds.sh` section 8: simulation of modify, snapshot, restore and delete actions with the context a real gp2 request carries, and for a deployed `kb-db` its retention, protection, latest restorable time and snapshots. Run 2026-11-08: all six actions allowed; `kb-db` not deployed.
+- `infra/restore-test-db.sh` (new, **not run**): point-in-time copy of `kb-db` into temporary public resources reachable only from the laptop, checked over TLS, then deleted.
+- `docs/RECOVERY.md` (new): backup layers with owner, location and survival, RPO and RTO per scenario, teardown and every restore procedure, status.
+
+**Deletion protection and the teardown scripts:** with protection on, `delete-stack` on `kb-db` fails (`DELETE_FAILED`) and leaves the database running. `infra/teardown-db.sh` is now the only documented way to delete it. If someone already ran `delete-stack`, run `infra/teardown-db.sh` afterwards (it turns protection off and deletes again). Updating an existing `kb-db` to this template changes retention and protection in place (`ModifyDBInstance`, no replacement) and changes the deletion policies without touching the instance.
+
+**Sandbox resets** destroy RDS, its snapshots and the bucket; the laptop copy is the only independent recovery copy (`docs/RECOVERY.md`).
+
+**Restore test, needs approval (not done):** requires a deployed `kb-db` (itself a deploy needing approval). Creates one db.t3.micro Single-AZ copy (about 0.017 USD per hour), a temporary subnet group and security group; 20 to 40 minutes; well under 0.10 USD; the script deletes all three afterwards with no final snapshot. `kb-db` is only read.
+
+**Tests (`tests/test_infra.py`):** db template settings, parameters and exports; deploy overrides; dated copies and the 14-copy limit; teardown-db (order of modify and delete, refusal with `kb-app` present, stale, missing or damaged laptop copy, wrong confirmation, protection restored on a failed delete, protection already off, no stack); restore-test (nothing created without confirmation, cleanup never deletes an instance outside its prefix, deletes its own copy without a final snapshot, no write call names the source).
+
+## 25.6
+
+Filled in when the sub-phase is done.
 
 ## Do not
 

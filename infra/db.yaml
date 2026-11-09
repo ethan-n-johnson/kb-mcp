@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: kb-mcp database stack (RDS PostgreSQL with pgvector, private subnets, reachable only from instances in DbClientSg). Nothing here is retained; the S3 export is the backup that survives.
+Description: kb-mcp database stack (RDS PostgreSQL with pgvector, private subnets, reachable only from instances in DbClientSg). Automated backups (7 days by default), deletion protection, and a final snapshot when the stack deletes or replaces the database. A sandbox reset still loses all of it; the laptop copy (infra/up.sh save) is the backup that survives (docs/RECOVERY.md).
 
 Parameters:
   DbInstanceClass:
@@ -34,6 +34,19 @@ Parameters:
     Default: 'true'
     AllowedValues: ['true', 'false']
     Description: Encrypt the storage. KMS is list only in the sandbox, so false is the fallback if the create is refused.
+
+  BackupRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+    Description: Days of automated backups (point-in-time restore window). 7 by default (phase 25.5); lower it only if the sandbox refuses it.
+
+  DeletionProtection:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Refuse DeleteDBInstance while true, so a stray delete-stack fails instead of dropping the database. infra/teardown-db.sh turns it off right before a deliberate delete.
 
 Resources:
   DbSubnetGroup:
@@ -77,13 +90,19 @@ Resources:
         - Key: Project
           Value: kb-mcp
 
-  # A sandbox reset loses RDS anyway; the S3 export (phase 20) survives it.
+  # Recovery layers (docs/RECOVERY.md): automated backups for point-in-time
+  # restore, a final snapshot whenever CloudFormation deletes or replaces the
+  # instance (Snapshot policies), deletion protection against a stray delete, and
+  # the S3 export plus the laptop copy, which alone survive a sandbox reset.
+  # Final snapshots are kept until someone deletes them (aws rds delete-db-snapshot,
+  # allowed in the lab, 2026-11-08) or the sandbox is reset; each costs snapshot
+  # storage for the data it holds.
   # W1011: the password is a NoEcho parameter, not a dynamic reference, because the
   # sandbox does not list Secrets Manager and the instances cannot read SSM.
   Db:
     Type: AWS::RDS::DBInstance
-    DeletionPolicy: Delete
-    UpdateReplacePolicy: Delete
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
     Metadata:
       cfn-lint:
         config:
@@ -104,8 +123,13 @@ Resources:
       DBSubnetGroupName: !Ref DbSubnetGroup
       VPCSecurityGroups:
         - !GetAtt DbSg.GroupId
-      BackupRetentionPeriod: 1
-      DeletionProtection: false
+      BackupRetentionPeriod: !Ref BackupRetentionDays
+      # 06:00 to 06:30 UTC, before the nightly export-sqlite at 07:15 UTC.
+      PreferredBackupWindow: '06:00-06:30'
+      # Must not overlap the backup window; Sunday 08:00 to 08:30 UTC.
+      PreferredMaintenanceWindow: 'sun:08:00-sun:08:30'
+      CopyTagsToSnapshot: true
+      DeletionProtection: !Ref DeletionProtection
       Tags:
         - Key: Project
           Value: kb-mcp
@@ -121,6 +145,11 @@ Outputs:
     Value: !GetAtt Db.Endpoint.Port
     Export:
       Name: kb-DbPort
+  DbInstanceId:
+    Description: RDS instance identifier (CloudWatch DBInstanceIdentifier dimension, teardown and restore)
+    Value: !Ref Db
+    Export:
+      Name: kb-DbInstanceId
   DbClientSg:
     Description: Security group the app instances attach to reach the database
     Value: !GetAtt DbClientSg.GroupId

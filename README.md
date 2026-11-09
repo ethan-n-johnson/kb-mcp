@@ -271,17 +271,15 @@ cd ~/kb-mcp
 infra/up.sh                  # deploys what is missing, in order: network, data, tokens, database, image, app
 infra/up.sh save             # before the lab session ends: downloads the database to ~/.config/kb-mcp/kb-latest.db.gz
 infra/teardown-app.sh        # deletes kb-app only (asks you to type the stack name); data stays
+infra/teardown-db.sh         # deletes kb-db after checks (fresh laptop copy, kb-app gone); final snapshot kept
+infra/restore-test-db.sh     # proves RDS restores on a temporary copy, then deletes it (costs cents; ask first)
 infra/class-capacity.sh up   # 4 instances for class (postgres mode); see docs/DEMO.md
 infra/deploy.sh network|data|db|app [ImageTag]    # one stack by hand; infra/push-image.sh --build builds and uploads the image
 ```
 
 `infra/up.sh` is safe to run again at any time: unchanged stacks report "No changes to deploy". It prints the CloudFront domain at the end. The first deploy in a new account takes about 30 minutes (measured 2026-11-07 from an empty account: 26 minutes in all, of which `kb-db` about 15, the image build and upload about 3 and `kb-app` about 6; allow more for a slow network). After every deploy, run one warm-up search before anyone else does. In `postgres` mode `infra/up.sh save` first asks the app to export RDS to S3, then downloads the export.
 
-Delete `kb-db` only after `infra/up.sh save` succeeded, and only after `kb-app` is gone (it imports `kb-DbClientSg`):
-
-```bash
-aws cloudformation delete-stack --stack-name kb-db && aws cloudformation wait stack-delete-complete --stack-name kb-db
-```
+Delete `kb-db` only with `infra/teardown-db.sh`, after `infra/up.sh save` and `infra/teardown-app.sh` (`kb-app` imports `kb-DbClientSg`). Since phase 25.5 `kb-db` has deletion protection, 7 days of automated backups and a final snapshot on delete, so a plain `delete-stack` fails; the script checks the laptop copy, turns protection off, and deletes. Backup layers, recovery objectives and every restore procedure are in `docs/RECOVERY.md`.
 
 The next `infra/up.sh` recreates `kb-db` and `kb-app` and imports the saved database. Never delete `kb-network` or `kb-data` without asking. Check a deployment with `scripts/demo_check.sh "$CF"` (read only, PASS or FAIL per line).
 

@@ -21,6 +21,9 @@
 #      simulation cannot see, so a real create in phase 19 is the final answer.
 #   7. With --try-subnet-group: create and delete a DB subnet group (proves
 #      rds:CreateDBSubnetGroup and that the two private subnets are in two AZs).
+#   8. Backups (phase 25.5): simulation of modify, snapshot, restore and delete
+#      actions, and for a deployed kb-db its retention, deletion protection,
+#      latest restorable time and snapshots. Read only.
 set -euo pipefail
 
 REGION="us-east-1"
@@ -113,7 +116,8 @@ else
   for multi in false true; do
     DECISION="$(aws_q iam simulate-principal-policy --policy-source-arn "$ROLE_ARN" \
       --action-names rds:CreateDBInstance \
-      --context-entries "ContextKeyName=rds:DatabaseClass,ContextKeyValues=db.t3.micro,ContextKeyType=string" \
+      --context-entries "ContextKeyName=aws:RequestedRegion,ContextKeyValues=$REGION,ContextKeyType=string" \
+      "ContextKeyName=rds:DatabaseClass,ContextKeyValues=db.t3.micro,ContextKeyType=string" \
       "ContextKeyName=rds:MultiAz,ContextKeyValues=$multi,ContextKeyType=boolean" \
       "ContextKeyName=rds:DatabaseEngine,ContextKeyValues=postgres,ContextKeyType=string" \
       --query 'EvaluationResults[0].EvalDecision' --output text || true)"
@@ -149,6 +153,46 @@ if [[ "$TRY_SUBNET_GROUP" == 1 ]]; then
       bad "rds:CreateDBSubnetGroup denied, or the subnets are not in two AZs"
     fi
   fi
+fi
+
+echo "== 8. Backups, restore and deletion protection (phase 25.5, read only)"
+# The context must carry what a real gp2 request carries: aws:RequestedRegion,
+# rds:Piops=0 and rds:StorageSize. The lab policy denies provisioned IOPS and
+# large storage, and the simulator treats a missing key as a match for those
+# denies, so leaving one out reports a false explicit deny (seen 2026-11-08: with
+# Piops=0 and 20 GB, modify and both restores are allowed; 200 GB or 1000 IOPS
+# are denied).
+if [[ -z "$ROLE_ARN" ]]; then
+  info "caller is not an assumed role; simulation skipped"
+else
+  for action in rds:ModifyDBInstance rds:CreateDBSnapshot rds:RestoreDBInstanceToPointInTime \
+    rds:RestoreDBInstanceFromDBSnapshot rds:DeleteDBInstance rds:DeleteDBSnapshot; do
+    DECISION="$(aws_q iam simulate-principal-policy --policy-source-arn "$ROLE_ARN" \
+      --action-names "$action" \
+      --context-entries "ContextKeyName=aws:RequestedRegion,ContextKeyValues=$REGION,ContextKeyType=string" \
+      "ContextKeyName=rds:DatabaseClass,ContextKeyValues=db.t3.micro,ContextKeyType=string" \
+      "ContextKeyName=rds:DatabaseEngine,ContextKeyValues=postgres,ContextKeyType=string" \
+      "ContextKeyName=rds:Piops,ContextKeyValues=0,ContextKeyType=numeric" \
+      "ContextKeyName=rds:StorageSize,ContextKeyValues=20,ContextKeyType=numeric" \
+      --query 'EvaluationResults[0].EvalDecision' --output text || true)"
+    if [[ "$DECISION" == "allowed" ]]; then ok "$action: allowed"; else bad "$action: ${DECISION:-simulation not allowed}"; fi
+  done
+fi
+DB_ID="$(aws_q cloudformation list-exports --query "Exports[?Name=='kb-DbInstanceId'].Value | [0]" --output text || true)"
+if [[ -z "$DB_ID" || "$DB_ID" == "None" ]]; then
+  info "kb-db is not deployed (no kb-DbInstanceId export); nothing to inspect"
+else
+  # shellcheck disable=SC2016  # backticks are JMESPath literals, not shell
+  aws_q rds describe-db-instances --db-instance-identifier "$DB_ID" \
+    --query 'DBInstances[0].[BackupRetentionPeriod,DeletionProtection,MultiAZ,PreferredBackupWindow,LatestRestorableTime]' \
+    --output text | while read -r days protected multi window latest; do
+      if [[ "$days" -ge 7 ]]; then ok "$DB_ID backup retention $days days"; else bad "$DB_ID backup retention $days days (want 7)"; fi
+      if [[ "$protected" == "True" ]]; then ok "$DB_ID deletion protection on"; else bad "$DB_ID deletion protection off"; fi
+      info "Multi-AZ $multi, backup window $window, latest restorable time $latest"
+    done
+  SNAPS="$(aws_q rds describe-db-snapshots --db-instance-identifier "$DB_ID" \
+    --query 'DBSnapshots[].[SnapshotType,DBSnapshotIdentifier,SnapshotCreateTime]' --output text || true)"
+  if [[ -n "$SNAPS" ]]; then while read -r kind name when; do info "snapshot $kind $name $when"; done <<< "$SNAPS"; else info "no snapshots yet"; fi
 fi
 
 echo "== done. Paste this output into docs/PROGRESS.md (Environment) and phase 19 picks the settings from it."

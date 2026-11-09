@@ -14,8 +14,10 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1257,6 +1259,24 @@ def test_up_save_downloads_the_snapshot(up_env: dict[str, Path]) -> None:
     assert result.returncode == 0, result.stderr
     assert (up_env["config"] / "kb-latest.db.gz").read_bytes() == b"latest db"
     assert not [c for c in up_calls(up_env) if c.startswith(("deploy.sh", "push-image.sh"))]
+    (dated,) = (up_env["config"] / "saved").glob("kb-*.db.gz")
+    assert re.fullmatch(r"kb-\d{8}T\d{6}Z\.db\.gz", dated.name) and dated.read_bytes() == b"latest db"
+
+
+def test_up_save_keeps_the_newest_fourteen_dated_copies(up_env: dict[str, Path]) -> None:
+    """Phase 25.5: a bad save never replaces the only good laptop copy."""
+    (up_env["state"] / "stack-kb-data").write_text("CREATE_COMPLETE\n", encoding="utf-8")
+    (up_env["state"] / "obj-snapshots_kb-latest.db.gz").write_bytes(b"latest db")
+    saved = up_env["config"] / "saved"
+    saved.mkdir()
+    for day in range(1, 17):
+        (saved / f"kb-202610{day:02d}T000000Z.db.gz").write_bytes(b"old")
+    assert run_up(up_env, "save").returncode == 0
+    names = sorted(p.name for p in saved.glob("kb-*.db.gz"))
+    # The new copy plus the 13 newest old ones (days 4 to 16); days 1 to 3 are gone.
+    assert len(names) == 14
+    assert names[:13] == [f"kb-202610{day:02d}T000000Z.db.gz" for day in range(4, 17)]
+    assert (saved / names[13]).read_bytes() == b"latest db"
 
 
 # A stub curl: records its arguments and what arrived on stdin (the config that carries the token),
@@ -1518,21 +1538,34 @@ def test_db_client_group_is_empty(db: dict[str, Any]) -> None:
 def test_db_instance_settings(db: dict[str, Any]) -> None:
     instance = db["Resources"]["Db"]
     props = instance["Properties"]
-    assert instance["DeletionPolicy"] == "Delete" and instance["UpdateReplacePolicy"] == "Delete"
+    # Phase 25.5: a final snapshot whenever CloudFormation deletes or replaces the database.
+    assert instance["DeletionPolicy"] == "Snapshot" and instance["UpdateReplacePolicy"] == "Snapshot"
     assert props["Engine"] == "postgres"
     assert props["DBName"] == "kb" and props["MasterUsername"] == "kbadmin"
     assert props["AllocatedStorage"] == "20" and props["StorageType"] == "gp2"
     assert props["PubliclyAccessible"] is False
     assert props["MultiAZ"] == {"Ref": "MultiAz"}
     assert props["StorageEncrypted"] == {"Ref": "StorageEncrypted"}
-    assert props["BackupRetentionPeriod"] == 1 and props["DeletionProtection"] is False
+    assert props["BackupRetentionPeriod"] == {"Ref": "BackupRetentionDays"}
+    assert props["DeletionProtection"] == {"Ref": "DeletionProtection"}
+    assert props["CopyTagsToSnapshot"] is True
+    # The backup window ends before the nightly export (07:15 UTC) and the maintenance window does not overlap it.
+    assert props["PreferredBackupWindow"] == "06:00-06:30"
+    assert props["PreferredMaintenanceWindow"] == "sun:08:00-sun:08:30"
     assert props["VPCSecurityGroups"] == [{"Fn::GetAtt": ["DbSg", "GroupId"]}]
     assert props["MasterUserPassword"] == {"Ref": "DbPassword"}
 
 
 def test_db_parameters(db: dict[str, Any]) -> None:
     params = db["Parameters"]
-    assert set(params) == {"DbInstanceClass", "EngineVersion", "MultiAz", "DbPassword", "StorageEncrypted"}
+    assert set(params) == {
+        "DbInstanceClass", "EngineVersion", "MultiAz", "DbPassword", "StorageEncrypted",
+        "BackupRetentionDays", "DeletionProtection",
+    }
+    days = params["BackupRetentionDays"]
+    assert (days["Type"], days["Default"], days["MinValue"], days["MaxValue"]) == ("Number", 7, 1, 35)
+    assert params["DeletionProtection"]["Default"] == "true"
+    assert params["DeletionProtection"]["AllowedValues"] == ["true", "false"]
     password = params["DbPassword"]
     assert password["NoEcho"] is True and "Default" not in password
     assert (password["MinLength"], password["MaxLength"]) == (16, 64)
@@ -1558,7 +1591,11 @@ def test_db_stack_imports_what_the_network_stack_exports(db: dict[str, Any]) -> 
 
 def test_db_outputs_and_exports(db: dict[str, Any]) -> None:
     exports = {name: o["Export"]["Name"] for name, o in db["Outputs"].items()}
-    assert exports == {"DbEndpoint": "kb-DbEndpoint", "DbPort": "kb-DbPort", "DbClientSg": "kb-DbClientSg"}
+    assert exports == {
+        "DbEndpoint": "kb-DbEndpoint", "DbPort": "kb-DbPort", "DbClientSg": "kb-DbClientSg",
+        "DbInstanceId": "kb-DbInstanceId",
+    }
+    assert db["Outputs"]["DbInstanceId"]["Value"] == {"Ref": "Db"}
 
 
 def test_no_password_is_written_in_the_repo_templates_or_scripts() -> None:
@@ -1596,12 +1633,13 @@ def test_deploy_db_passes_the_overrides_that_are_set(stub_bin: Path) -> None:
     env = {
         "KB_DB_PASSWORD": DB_PASSWORD, "KB_DB_CLASS": "db.t3.small", "KB_DB_VERSION": "16.9",
         "KB_DB_MULTI_AZ": "false", "KB_DB_ENCRYPTED": "false",
+        "KB_DB_BACKUP_DAYS": "3", "KB_DB_DELETION_PROTECTION": "false",
     }
     run_script(DEPLOY, ["db"], stub_bin, env)
     deploy = next(c for c in calls(stub_bin) if "cloudformation deploy" in c)
     assert deploy.split("--parameter-overrides", 1)[1].split() == [
         f"DbPassword={DB_PASSWORD}", "DbInstanceClass=db.t3.small", "EngineVersion=16.9",
-        "MultiAz=false", "StorageEncrypted=false",
+        "MultiAz=false", "StorageEncrypted=false", "BackupRetentionDays=3", "DeletionProtection=false",
     ]
 
 
@@ -1787,3 +1825,196 @@ def test_class_capacity_status_reads_only(tmp_path: Path) -> None:
     assert changing == []
     assert any("describe-target-health" in c for c in calls(bin_dir))
     assert any("describe-scheduled-actions" in c for c in calls(bin_dir))
+
+
+# --- infra/teardown-db.sh (phase 25.5) -----------------------------------------------------
+
+TEARDOWN_DB = INFRA / "teardown-db.sh"
+
+# A stub aws for teardown-db.sh: stacks exist when $state/stack-<name> exists; the
+# instance's protection is $state/protected (True or False); a failed wait when
+# $state/delete-fails exists.
+AWS_TEARDOWN_STUB = r"""
+echo "aws $*" >> {log}
+case "$1 $2" in
+  "cloudformation describe-stacks")
+    for a in "$@"; do last="$a"; done
+    [ -f "{state}/stack-$last" ] || exit 254 ;;
+  "cloudformation describe-stack-resource") echo "kb-db-db-abc123" ;;
+  "rds describe-db-instances") cat "{state}/protected" ;;
+  "rds modify-db-instance")
+    case " $* " in *" --no-deletion-protection "*) echo False > "{state}/protected" ;; *) echo True > "{state}/protected" ;; esac ;;
+  "cloudformation wait") [ ! -f "{state}/delete-fails" ] || exit 255 ;;
+  "rds describe-db-snapshots") echo "rds:kb-db-final 2026-11-08T12:00:00Z available" ;;
+esac
+exit 0
+"""
+
+
+@pytest.fixture
+def teardown_env(tmp_path: Path) -> dict[str, Path]:
+    state, bin_dir, config = tmp_path / "state", tmp_path / "bin", tmp_path / "config"
+    for d in (state, bin_dir, config):
+        d.mkdir()
+    log = tmp_path / "calls.log"
+    make_stub(bin_dir, "aws", AWS_TEARDOWN_STUB.format(log=log, state=state))
+    (state / "stack-kb-db").write_text("", encoding="utf-8")
+    (state / "protected").write_text("True\n", encoding="utf-8")
+    db_file = tmp_path / "kb.db"
+    conn = sqlite3.connect(db_file)
+    conn.executescript("CREATE TABLE docs(id INTEGER); CREATE TABLE chunks(id INTEGER); INSERT INTO docs VALUES (1);")
+    conn.close()
+    (config / "kb-latest.db.gz").write_bytes(gzip.compress(db_file.read_bytes()))
+    return {"state": state, "bin": bin_dir, "config": config, "log": log}
+
+
+def run_teardown(env: dict[str, Path], answer: str = "kb-db\n", **extra: str) -> subprocess.CompletedProcess[str]:
+    base = {"PATH": f"{env['bin']}:/usr/bin:/bin", "HOME": str(env["config"].parent), "KB_CONFIG_DIR": str(env["config"])}
+    return subprocess.run(
+        ["bash", str(TEARDOWN_DB)], input=answer, capture_output=True, text=True, env=base | extra, timeout=60,
+    )
+
+
+def teardown_calls(env: dict[str, Path]) -> list[str]:
+    return env["log"].read_text(encoding="utf-8").splitlines() if env["log"].exists() else []
+
+
+def test_teardown_db_turns_protection_off_then_deletes_and_lists_the_final_snapshot(teardown_env: dict[str, Path]) -> None:
+    result = run_teardown(teardown_env)
+    assert result.returncode == 0, result.stderr
+    log = teardown_calls(teardown_env)
+    modify = next(i for i, c in enumerate(log) if "rds modify-db-instance" in c)
+    delete = next(i for i, c in enumerate(log) if "cloudformation delete-stack" in c)
+    assert modify < delete
+    assert "--no-deletion-protection" in log[modify] and "--db-instance-identifier kb-db-db-abc123" in log[modify]
+    assert "integrity ok, 1 docs, 0 chunks" in result.stdout
+    assert "rds:kb-db-final" in result.stdout
+
+
+def test_teardown_db_refuses_while_kb_app_exists(teardown_env: dict[str, Path]) -> None:
+    (teardown_env["state"] / "stack-kb-app").write_text("", encoding="utf-8")
+    result = run_teardown(teardown_env)
+    assert result.returncode == 1 and "kb-app still exists" in result.stderr
+    assert not [c for c in teardown_calls(teardown_env) if "delete-stack" in c or "modify-db-instance" in c]
+
+
+def test_teardown_db_refuses_without_a_fresh_laptop_copy(teardown_env: dict[str, Path]) -> None:
+    copy = teardown_env["config"] / "kb-latest.db.gz"
+    old = time.time() - 2 * 3600
+    os.utime(copy, (old, old))
+    result = run_teardown(teardown_env)
+    assert result.returncode == 1 and "older than 60 minutes" in result.stderr
+    copy.unlink()
+    result = run_teardown(teardown_env)
+    assert result.returncode == 1 and "no laptop copy" in result.stderr
+    assert not [c for c in teardown_calls(teardown_env) if "delete-stack" in c or "modify-db-instance" in c]
+
+
+def test_teardown_db_refuses_a_damaged_laptop_copy(teardown_env: dict[str, Path]) -> None:
+    (teardown_env["config"] / "kb-latest.db.gz").write_bytes(gzip.compress(b"not a database"))
+    result = run_teardown(teardown_env)
+    assert result.returncode == 1 and "failed its check" in result.stderr
+    assert not [c for c in teardown_calls(teardown_env) if "delete-stack" in c]
+
+
+def test_teardown_db_does_nothing_unless_the_stack_name_is_typed(teardown_env: dict[str, Path]) -> None:
+    result = run_teardown(teardown_env, answer="yes\n")
+    assert result.returncode == 1 and "Aborted" in result.stdout
+    assert not [c for c in teardown_calls(teardown_env) if "delete-stack" in c or "modify-db-instance" in c]
+    assert (teardown_env["state"] / "protected").read_text().strip() == "True"
+
+
+def test_teardown_db_turns_protection_back_on_when_the_delete_fails(teardown_env: dict[str, Path]) -> None:
+    (teardown_env["state"] / "delete-fails").write_text("", encoding="utf-8")
+    result = run_teardown(teardown_env)
+    assert result.returncode == 1 and "delete of kb-db failed" in result.stderr
+    assert (teardown_env["state"] / "protected").read_text().strip() == "True"
+
+
+def test_teardown_db_with_protection_already_off_skips_the_modify(teardown_env: dict[str, Path]) -> None:
+    (teardown_env["state"] / "protected").write_text("False\n", encoding="utf-8")
+    assert run_teardown(teardown_env).returncode == 0
+    assert not [c for c in teardown_calls(teardown_env) if "modify-db-instance" in c]
+
+
+def test_teardown_db_without_the_stack_exits_zero(teardown_env: dict[str, Path]) -> None:
+    (teardown_env["state"] / "stack-kb-db").unlink()
+    result = run_teardown(teardown_env)
+    assert result.returncode == 0 and "Nothing to delete" in result.stdout
+
+
+# --- infra/restore-test-db.sh (phase 25.5) -------------------------------------------------
+
+RESTORE_TEST = INFRA / "restore-test-db.sh"
+
+AWS_RESTORE_STUB = r"""
+echo "aws $*" >> {log}
+case " $* " in
+  *" list-exports "*)
+    case " $* " in
+      *kb-DbInstanceId*) echo "kb-db-db-abc123" ;; *kb-VpcId*) echo "vpc-1" ;;
+      *kb-PublicSubnetA*) echo "subnet-a" ;; *kb-PublicSubnetB*) echo "subnet-b" ;; esac ;;
+  *" rds describe-db-instances "*"LatestRestorableTime"*) echo "2026-11-08T12:00:00Z" ;;
+  *" rds describe-db-instances "*) cat "{state}/instances" 2>/dev/null || true ;;
+  *" describe-db-subnet-groups "*) exit 255 ;;
+  *" describe-security-groups "*) echo "None" ;;
+esac
+exit 0
+"""
+
+
+@pytest.fixture
+def restore_env(tmp_path: Path) -> dict[str, Path]:
+    state, bin_dir, config = tmp_path / "state", tmp_path / "bin", tmp_path / "config"
+    for d in (state, bin_dir, config):
+        d.mkdir()
+    log = tmp_path / "calls.log"
+    make_stub(bin_dir, "aws", AWS_RESTORE_STUB.format(log=log, state=state))
+    make_stub(bin_dir, "curl", 'echo "203.0.113.7"\n')
+    (config / "db-password").write_text("Abcd1234Efgh5678\n", encoding="utf-8")
+    return {"state": state, "bin": bin_dir, "config": config, "log": log}
+
+
+def run_restore_test(env: dict[str, Path], *args: str, answer: str = "") -> subprocess.CompletedProcess[str]:
+    base = {
+        "PATH": f"{env['bin']}:/usr/bin:/bin", "HOME": str(env["config"].parent),
+        "KB_CONFIG_DIR": str(env["config"]), "KB_PYTHON": "/bin/true",
+    }
+    return subprocess.run(
+        ["bash", str(RESTORE_TEST), *args], input=answer, capture_output=True, text=True, env=base, timeout=60,
+    )
+
+
+def test_restore_test_creates_nothing_without_the_typed_confirmation(restore_env: dict[str, Path]) -> None:
+    result = run_restore_test(restore_env, answer="yes\n")
+    assert result.returncode == 1 and "Aborted" in result.stdout
+    assert "source (read only):    kb-db-db-abc123" in result.stdout and "203.0.113.7/32" in result.stdout
+    log = restore_env["log"].read_text(encoding="utf-8")
+    for verb in ("create-", "restore-", "delete-", "modify-", "authorize-"):
+        assert verb not in log, verb
+    assert "Abcd1234Efgh5678" not in result.stdout + result.stderr
+
+
+def test_restore_test_cleanup_never_deletes_an_instance_outside_its_prefix(restore_env: dict[str, Path]) -> None:
+    (restore_env["state"] / "instances").write_text("kb-db-db-abc123\n", encoding="utf-8")
+    result = run_restore_test(restore_env, "--cleanup")
+    assert result.returncode == 1 and "refusing to delete kb-db-db-abc123" in result.stderr
+    assert "delete-db-instance" not in restore_env["log"].read_text(encoding="utf-8")
+
+
+def test_restore_test_cleanup_deletes_its_own_copy_without_a_final_snapshot(restore_env: dict[str, Path]) -> None:
+    (restore_env["state"] / "instances").write_text("kb-restore-test-20261108120000\n", encoding="utf-8")
+    result = run_restore_test(restore_env, "--cleanup")
+    assert result.returncode == 0, result.stderr
+    delete = next(c for c in restore_env["log"].read_text(encoding="utf-8").splitlines() if "delete-db-instance" in c)
+    assert "--db-instance-identifier kb-restore-test-20261108120000" in delete
+    assert "--skip-final-snapshot" in delete
+
+
+def test_restore_test_never_names_the_source_in_a_write_call() -> None:
+    """The only calls that take the source identifier are the read and the restore's --source flag."""
+    text = RESTORE_TEST.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if "SOURCE_ID" in line and re.search(r"\b(delete|modify|stop|reboot)-db-instance\b", line):
+            raise AssertionError(line)
+    assert '--source-db-instance-identifier "$SOURCE_ID"' in text

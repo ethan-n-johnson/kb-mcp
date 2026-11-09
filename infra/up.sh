@@ -33,7 +33,8 @@
 #                      KB_ALERT_EMAIL=you@example.com          (required)
 #                      KB_INSTANCE_PROFILE=myS3Role            (optional)
 #                      KB_METRICS_MODE, KB_EXTENSION_ORIGIN     (optional, see deploy.sh)
-#                      KB_DB_CLASS, KB_DB_VERSION, KB_DB_MULTI_AZ, KB_DB_ENCRYPTED
+#                      KB_DB_CLASS, KB_DB_VERSION, KB_DB_MULTI_AZ, KB_DB_ENCRYPTED,
+#                      KB_DB_BACKUP_DAYS, KB_DB_DELETION_PROTECTION
 #                                                               (optional, see deploy.sh)
 #                      KB_DATABASE_MODE=postgres                (optional, default sqlite)
 #   write-tokens     name:secret,name:secret (created on the first run if missing)
@@ -41,6 +42,7 @@
 #                    on the first run if missing, mode 600). Lose it and the next
 #                    kb-db deploy fails; delete kb-db first, then the file.
 #   kb-latest.db.gz  the snapshot saved by "infra/up.sh save"
+#   saved/           dated copies of each save (kb-<UTC time>.db.gz), the newest 14
 set -euo pipefail
 
 REGION="us-east-1"
@@ -50,6 +52,8 @@ CONFIG_FILE="$CONFIG_DIR/up.env"
 TOKENS_FILE="$CONFIG_DIR/write-tokens"
 DB_PASSWORD_FILE="$CONFIG_DIR/db-password"
 SNAPSHOT_FILE="$CONFIG_DIR/kb-latest.db.gz"
+SAVED_DIR="$CONFIG_DIR/saved"
+KEEP_SAVED=14
 TOKENS_KEY="config/write-tokens"
 DB_URL_KEY="config/database-url"
 SNAPSHOT_KEY="snapshots/kb-latest.db.gz"
@@ -146,7 +150,13 @@ save_snapshot() {
   mkdir -p "$CONFIG_DIR"
   aws s3 cp "s3://$BUCKET/$SNAPSHOT_KEY" "$SNAPSHOT_FILE.tmp" --region "$REGION" > /dev/null
   mv "$SNAPSHOT_FILE.tmp" "$SNAPSHOT_FILE"
-  step "saved $SNAPSHOT_FILE; the next infra/up.sh uploads it if the bucket has no snapshot"
+  # Keep dated copies too, so a bad save (an export taken after a mistake) never
+  # replaces the only good one. The newest KEEP_SAVED stay (docs/RECOVERY.md).
+  mkdir -p "$SAVED_DIR"
+  cp "$SNAPSHOT_FILE" "$SAVED_DIR/kb-$(date -u +%Y%m%dT%H%M%SZ).db.gz"
+  find "$SAVED_DIR" -maxdepth 1 -name 'kb-*.db.gz' -type f | sort -r | tail -n "+$((KEEP_SAVED + 1))" \
+    | while IFS= read -r old; do rm -f -- "$old"; done
+  step "saved $SNAPSHOT_FILE (and a dated copy in $SAVED_DIR); the next infra/up.sh uploads it if the bucket has no snapshot"
 }
 
 if [ $# -gt 1 ]; then
