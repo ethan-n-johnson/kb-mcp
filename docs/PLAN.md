@@ -60,7 +60,7 @@ The project reuses the course's layered build (network, compute, storage, edge, 
 | Networking (VPC) | Custom VPC, public and private subnets in 2 AZs, route tables, internet gateway, NAT gateway |
 | Connecting networks | S3 gateway endpoint so backups never cross the NAT gateway |
 | Securing user and application access | Security group chaining: CloudFront prefix list to ALB, ALB to app, app to EFS (superseded: see Sandbox changes); bearer tokens in Parameter Store |
-| Monitoring, elasticity, high availability | ALB health checks on `/healthz`; Auto Scaling group replaces a failed instance in either AZ; CloudWatch alarms to SNS |
+| Monitoring, elasticity, high availability | ALB health checks on `/livez` (phase 25.3; `/healthz` stays the readiness check); Auto Scaling group replaces a failed instance in either AZ; CloudWatch alarms to SNS |
 | Automating your architecture | All resources in CloudFormation, split into network, data and app stacks |
 | Caching content | CloudFront for HTTPS and caching of static UI assets; API and MCP paths pass through uncached |
 | Decoupled and serverless architectures | Stretch: weekly EventBridge-scheduled Lambda emails the `stale` and `gaps` reports through SNS |
@@ -180,7 +180,7 @@ Keyword fallback runs FTS5 `MATCH` with BM25 ranking and `snippet()` highlights.
 - inference raises an error or takes longer than 3 seconds,
 - or the admin toggle `POST /api/admin/fallback` (token required) is on, for the demo.
 
-`GET /healthz` reports the current mode, model status and chunk count; the ALB target group uses it as the health check. Each search also logs CloudWatch metrics (latency, mode, confidence), and an alarm on keyword mode emails you through SNS.
+`GET /healthz` reports the current mode, model status and chunk count (readiness: the boot waits for it before signalling CloudFormation). `GET /livez` answers 200 whenever the process serves HTTP and reads nothing else; since phase 25.3 the ALB target group uses it as the health check, so a database outage cannot make the load balancer replace every instance. Each search also logs CloudWatch metrics (latency, mode, confidence), and an alarm on keyword mode emails you through SNS.
 
 Confidence flag (starting thresholds, tuned on Day 5 against about 20 hand-written test questions):
 
@@ -278,7 +278,7 @@ The private subnets reach ECR, CloudWatch and Parameter Store through the NAT ga
 | --- | --- | --- |
 | `kb-network` | VPC `10.0.0.0/16`; public subnets `10.0.1.0/24` and `10.0.2.0/24`; private subnets `10.0.11.0/24` and `10.0.12.0/24`; internet gateway; public and private route tables; S3 gateway endpoint | All week |
 | `kb-data` | EFS file system (encrypted, mount target in each private subnet, EFS security group); S3 bucket (versioned, Block Public Access); ECR repository | All week; `DeletionPolicy: Retain` on EFS and S3 |
-| `kb-app` | NAT gateway with Elastic IP in public subnet a; private default route to it; ALB, target group (health check `/healthz`), port 80 listener; launch template (`t3.medium`, Amazon Linux 2023, `LabInstanceProfile`, IMDSv2); Auto Scaling group (min 1, max 1, ELB health checks) over both private subnets; CloudFront distribution; CloudWatch alarms; SNS topic | All week if sandbox credit allows; otherwise delete between sessions |
+| `kb-app` | NAT gateway with Elastic IP in public subnet a; private default route to it; ALB, target group (health check `/livez` since phase 25.3, `/healthz` before), port 80 listener; launch template (`t3.medium`, Amazon Linux 2023, `LabInstanceProfile`, IMDSv2); Auto Scaling group (min 1, max 1, ELB health checks) over both private subnets; CloudFront distribution; CloudWatch alarms; SNS topic | All week if sandbox credit allows; otherwise delete between sessions |
 
 The app stack's NAT gateway, ALB and instance each bill by the hour, while the other two stacks cost almost nothing at this size. Deleting `kb-app` between sessions saves credit, but each recreate brings a new CloudFront domain, so you must rerun `claude mcp add`. Check your remaining sandbox credit before deciding.
 

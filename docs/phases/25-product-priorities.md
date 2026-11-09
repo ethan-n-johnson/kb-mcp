@@ -23,7 +23,7 @@ Status words: not started, in progress, implemented (code written), tested (loca
 | --- | --- | --- | --- |
 | 25.1 Shared search | Implemented and tested in phases 20 and 21; deployed in account `983926826929` | Pool checks each connection before use (RDS failover) | tested (SQLite legs; the `pg` legs need `KB_TEST_DATABASE_URL`, see 25.1) |
 | 25.2 Scale-out | Implemented, tested and deployed in phases 22, 23, 23a | One nightly export per group, not one per instance; single NAT gateway documented | tested (SQLite legs; `pg` legs need `KB_TEST_DATABASE_URL`) |
-| 25.3 Health checks | `/healthz` only, and the ALB uses it; it returns 503 when the database is unreachable for 60 s | `/livez` for the ALB, `/healthz` stays the readiness check | not started |
+| 25.3 Health checks | `/healthz` only, and the ALB uses it; it returns 503 when the database is unreachable for 60 s | `/livez` for the ALB, `/healthz` stays the readiness check | tested (SQLite legs; `pg` legs need `KB_TEST_DATABASE_URL`) |
 | 25.4 Write auth | Implemented and tested in phase 24 (MCP), phases 05 to 16 (REST, UI) | Audit every write route and tool; fill test gaps only | not started |
 | 25.5 Backups | 1 day RDS retention, `DeletionPolicy: Delete`, no deletion protection; S3 export nightly | Retention 7, snapshot on delete and replace, protection parameter, teardown script, probe, `docs/RECOVERY.md` | not started |
 | 25.6 Alarms | 3 of 7 alarms can never receive data | Conditional custom-metric alarms; ALB, Auto Scaling and RDS alarms; dashboard; runbook | not started |
@@ -74,7 +74,21 @@ Account `834269865094` (AWS Academy Learner Lab, role `voclabs`), not the Cloud 
 
 **Tests:** `tests/test_portable.py` (`pg`: only the first of two connections claims within the window, the next night claims again, a failed export releases the claim, the CLI exports once and then skips, a manual export is never skipped, a failed upload releases the claim; everywhere: `--once-per` must be a positive whole number), `tests/test_infra.py` (the cron line).
 
-## 25.3 to 25.6
+## 25.3 Independent health checks
+
+**Before:** the target group checked `/healthz` (interval 15 s, timeout 5 s, unhealthy after 3) and the Auto Scaling group uses `HealthCheckType: ELB`. In PostgreSQL mode `/healthz` answers from the health monitor's cache and returns 503 once the last successful database read is over 60 s old (`kb/health.py`). An RDS Multi-AZ failover commonly takes 60 to 120 s, so every instance would fail the check at the same moment and the group would replace all of them (about 10 minutes each under load, phase 23a), turning a database blip into a full outage.
+
+**Change:**
+
+- `GET /livez` in `kb/main.py`: `{"status": "alive"}`, 200 whenever the process answers HTTP. It reads nothing (no database, cache, search state, model or worker thread). uvicorn accepts connections only after the lifespan has finished, so `/livez` is not 200 before the app has started.
+- `infra/app.yaml`: `HealthCheckPath: /livez`; interval, timeout, thresholds and matcher unchanged.
+- `/healthz` is unchanged (readiness and diagnostics; still 503 when the database is unreadable or stale). The boot still waits for `/healthz` before `cfn-signal`, so a new instance that cannot reach the database fails its deploy instead of joining. `scripts/demo_check.sh` still reads `/healthz`.
+
+**Trade-off (accepted):** an instance whose own database access is broken while the process lives (for example a wrong security group on one instance) now stays in service and answers 500s instead of being replaced. The boot gate catches it for new instances, and `kb-5xx` (target 5xx) alerts on it. Replacing every instance during a shared outage is the worse failure.
+
+**Tests:** `tests/test_health.py`: both endpoints 200 on a normal app; with the SQLite connection closed `/healthz` is 503 and `/livez` 200; `/livez` works with the store opener patched to fail and the search state removed; `/livez` carries no diagnostics; `pg`: with the monitor's last check 61 s old, and with the monitor unable to reach the database, `/healthz` is 503 and `/livez` 200. `tests/test_infra.py`: the target group uses `/livez` with matcher 200, the group uses ELB health checks, the user data still waits for `/healthz` and never uses `/livez`.
+
+## 25.4 to 25.6
 
 Filled in as each sub-phase is done.
 

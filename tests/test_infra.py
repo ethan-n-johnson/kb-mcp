@@ -343,6 +343,21 @@ def test_the_app_keeps_idle_connections_open_longer_than_the_alb_does(resources:
     assert int(match.group(1)) > idle
 
 
+def test_the_load_balancer_checks_liveness_and_the_boot_waits_for_readiness(resources: dict[str, Any]) -> None:
+    """Phase 25.3: the ALB uses /livez (no database), the boot signal still waits for /healthz."""
+    (tg,) = of_type(resources, "AWS::ElasticLoadBalancingV2::TargetGroup").values()
+    props = tg["Properties"]
+    assert props["HealthCheckPath"] == "/livez"
+    assert props["Matcher"] == {"HttpCode": "200"}
+    # Three missed checks 15 s apart: a busy instance gets 45 s before it is marked unhealthy.
+    assert (props["HealthCheckIntervalSeconds"], props["UnhealthyThresholdCount"]) == (15, 3)
+    (asg,) = of_type(resources, "AWS::AutoScaling::AutoScalingGroup").values()
+    assert asg["Properties"]["HealthCheckType"] == "ELB"
+    rendered = render_user_data(resources)
+    assert "curl -sf http://localhost:8000/healthz" in rendered
+    assert "/livez" not in rendered
+
+
 def test_outputs(app: dict[str, Any]) -> None:
     out = app["Outputs"]
     assert out["DistributionDomainName"]["Value"] == {"Fn::GetAtt": ["Distribution", "DomainName"]}

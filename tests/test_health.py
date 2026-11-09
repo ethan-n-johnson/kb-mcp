@@ -1,4 +1,4 @@
-"""/healthz contract, and that it cannot be starved by load (phase 23a)."""
+"""/healthz contract, that it cannot be starved by load (phase 23a), and /livez (phase 25.3)."""
 
 from __future__ import annotations
 
@@ -49,6 +49,67 @@ def test_healthz_503_when_db_unreadable(client: TestClient) -> None:
     resp = client.get("/healthz")
     assert resp.status_code == 503
     assert resp.json()["status"] == "error"
+
+
+# --- /livez: liveness for the load balancer, independent of the database (phase 25.3) -----
+
+
+def test_livez_and_healthz_are_both_200_on_a_normal_app(client: TestClient) -> None:
+    live = client.get("/livez")
+    assert live.status_code == 200 and live.json() == {"status": "alive"}
+    assert client.get("/healthz").status_code == 200
+
+
+def test_livez_stays_200_when_the_database_is_unreadable_and_healthz_is_503(client: TestClient) -> None:
+    client.app.state.conn.close()
+    assert client.get("/healthz").status_code == 503
+    live = client.get("/livez")
+    assert live.status_code == 200 and live.json() == {"status": "alive"}
+
+
+def test_livez_reads_no_database_and_no_search_state(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("/livez touched a dependency")
+
+    monkeypatch.setattr("kb.store.open_store", forbidden)
+    client.app.state.conn.close()
+    client.app.state.search = None
+    assert client.get("/livez").status_code == 200
+
+
+def test_livez_carries_no_diagnostics(client: TestClient) -> None:
+    """Liveness says nothing about counts, models or the toggle; those stay on /healthz."""
+    assert set(client.get("/livez").json()) == {"status"}
+
+
+@pytest.mark.pg
+def test_livez_stays_200_when_the_database_check_is_stale_and_healthz_is_503(
+    open_app: OpenApp, pg_store: Store, monitor_clock: "Clock"
+) -> None:
+    """An RDS outage or failover longer than 60 s: readiness fails, liveness does not."""
+    with open_app(models=False) as client:
+        monitor = client.app.state.health
+        monitor.stop()
+        monitor._clock = monitor_clock
+        assert monitor.check_once()
+        monitor_clock.now += 61
+        assert client.get("/healthz").status_code == 503
+        assert client.get("/livez").status_code == 200
+
+
+@pytest.mark.pg
+def test_livez_stays_200_when_the_monitor_cannot_reach_the_database(
+    open_app: OpenApp, pg_store: Store, monitor_clock: "Clock"
+) -> None:
+    with open_app(models=False) as client:
+        monitor = client.app.state.health
+        monitor.stop()
+        monitor._url = "postgresql://user:pw@127.0.0.1:1/none"
+        monitor._clock = monitor_clock
+        monitor_clock.now += 61
+        assert not monitor.check_once()
+        assert client.get("/healthz").status_code == 503
+        assert client.get("/livez").status_code == 200
 
 
 # --- /healthz under load (phase 23a) -------------------------------------------------------

@@ -334,7 +334,7 @@ See `CLAUDE.md` for the local web server, PostgreSQL mode and the environment va
 | Networking (VPC) | Custom VPC, public and private subnets in 2 AZs, route tables, internet gateway, one NAT gateway |
 | Connecting networks | S3 gateway endpoint so snapshots and the image never cross the NAT gateway; RDS reachable only through `kb-DbClientSg` |
 | Securing user and application access | Security group chaining (CloudFront prefix list, ALB, app, RDS), bearer write tokens kept in the private bucket (SSM is unreachable from the instance role), MCP write tools gated in the application |
-| Monitoring, elasticity, high availability | ALB health checks on `/healthz`; Auto Scaling group (min 2, max 4, CPU target 50 percent) replaces failed instances in either AZ; ALB and capacity alarms to SNS. Search-metric alarms exist but have no data (the sandbox role cannot publish metrics, `MetricsMode=off`) |
+| Monitoring, elasticity, high availability | ALB health checks on `/livez` (liveness, no database; `/healthz` is the readiness and diagnostics endpoint); Auto Scaling group (min 2, max 4, CPU target 50 percent) replaces failed instances in either AZ; ALB and capacity alarms to SNS. Search-metric alarms exist but have no data (the sandbox role cannot publish metrics, `MetricsMode=off`) |
 | Automating your architecture | All resources in CloudFormation, four stacks, `infra/up.sh` from an empty account, `cfn-lint` and `validate-template` before every deploy |
 | Caching content | CloudFront for HTTPS and caching of `/static/*`; API, UI pages and MCP pass through uncached |
 | Decoupled and serverless architectures | Not built. The weekly EventBridge and Lambda report was a stretch goal; EventBridge is not on the sandbox list |

@@ -176,6 +176,12 @@ Resources:
         - Key: Project
           Value: kb-mcp
 
+  # The health check is liveness (/livez, phase 25.3): the process answers HTTP.
+  # It must not depend on the database: with HealthCheckType ELB on the group, a
+  # database outage or RDS failover would otherwise mark every instance unhealthy
+  # at once and the group would replace them all. Readiness (/healthz: database
+  # readable, counts, model status) gates the boot signal in the user data and
+  # stays the diagnostic endpoint.
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -184,7 +190,7 @@ Resources:
       Port: 8000
       TargetType: instance
       HealthCheckProtocol: HTTP
-      HealthCheckPath: /healthz
+      HealthCheckPath: /livez
       HealthCheckIntervalSeconds: 15
       HealthCheckTimeoutSeconds: 5
       HealthyThresholdCount: 2
