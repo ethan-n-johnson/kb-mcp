@@ -638,7 +638,7 @@ def test_service_container_gets_the_url_source_only_through_db_opts(resources: d
 
 def test_nightly_job_exports_in_postgres_mode(resources: dict[str, Any]) -> None:
     rendered = render_user_data(resources)
-    assert "docker exec kb python -m kb.cli export-sqlite >> /var/log/kb-backup.log 2>&1" in rendered
+    assert "docker exec kb python -m kb.cli export-sqlite --once-per 3600 >> /var/log/kb-backup.log 2>&1" in rendered
     assert "docker exec kb python -m kb.cli backup >> /var/log/kb-backup.log 2>&1" in rendered
 
 

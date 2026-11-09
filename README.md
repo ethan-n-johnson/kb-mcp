@@ -73,7 +73,7 @@ flowchart LR
   cw[CloudWatch alarms<br/>ALB health, 5xx, capacity] --> sns[SNS emails]
 ```
 
-Boot of an instance in `postgres` mode: install Docker, `docker load` the image from S3, import the S3 export into RDS only if the database is empty (`import-sqlite --if-empty`), start the container, load the models (about 3 minutes from launch to a healthy target on an idle stack, up to about 10 under load). Nightly at 07:15 UTC every instance runs `export-sqlite`; `infra/up.sh save` asks the app for a fresh export and downloads it.
+Boot of an instance in `postgres` mode: install Docker, `docker load` the image from S3, import the S3 export into RDS only if the database is empty (`import-sqlite --if-empty`), start the container, load the models (about 3 minutes from launch to a healthy target on an idle stack, up to about 10 under load). Nightly at 07:15 UTC every instance runs `export-sqlite --once-per 3600`, and the first to claim the run in the database exports while the others skip; `infra/up.sh save` asks the app for a fresh export and downloads it.
 
 ### The four stacks
 
@@ -432,7 +432,7 @@ Idle (both app and database stacks deleted) only S3 bills: the image tarball, sn
 
 ## Known limitations
 
-The full list is `docs/SECURITY_REVIEW.md` ("Known limitations", 23 items). The ones that matter for the demo and the class:
+The full list is `docs/SECURITY_REVIEW.md` ("Known limitations", 24 items). The ones that matter for the demo and the class:
 
 - **MCP writes need a token over HTTP; reads are public.** Decided 2026-11-07 (phase 24): the whole class gets the URL, so the seven write tools refuse a call without a valid bearer token, enforced in the app because IAM cannot gate anonymous HTTP clients. A claude.ai connector can therefore search but not write. Stdio is local and tokenless. Recovery from a bad write is the versioned S3 export and `import-sqlite`; run `infra/up.sh save` right before class.
 - **Reads are public.** Anyone with the CloudFront URL can read the whole knowledge base and the audit log.
@@ -442,6 +442,7 @@ The full list is `docs/SECURITY_REVIEW.md` ("Known limitations", 23 items). The 
 - **CloudFront to the ALB is plain HTTP** (no domain or certificate in the sandbox); bearer tokens instead of OAuth 2.1; no origin secret between CloudFront and the ALB; the instance role can read the whole account's S3.
 - **Occasional dropped connections** between the client and CloudFront were seen during deploys and failover drills (1 in 54 to 91 requests); the ALB counted no 5xx. Not explained (PROGRESS open issues).
 - **At 50 users (run3) almost every search is a keyword answer after a 5 s wait.** 4 instances serve about 0.7 semantic searches per second each; keyword search and RDS were not the limit (RDS at most 18 connections and 17 percent CPU).
+- **One NAT gateway, in AZ a.** If AZ a fails, instances in AZ b keep serving searches, but `ingest_url` fails and no replacement instance can boot until AZ a is back (`docs/SECURITY_REVIEW.md`, limitation 24). A second NAT gateway costs about 33 USD a month.
 - **Chrome extension: written, not yet tested in Chrome.**
 
 Scale-out path beyond this project: a custom domain with ACM on the ALB, MCP OAuth 2.1, a shared rate-limit counter (database, or CloudFront and WAF rules), a larger or faster model host, baking the models into the image so a new instance becomes healthy faster.

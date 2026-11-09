@@ -738,10 +738,11 @@ Resources:
               # 2:15 AM Central). crond was enabled with the packages above. The
               # container has KB_DB and KB_BUCKET; output goes to /var/log/kb-backup.log.
               # In postgres mode the nightly job refreshes the portable SQLite snapshot
-              # instead (RDS keeps its own backups).
+              # instead (RDS keeps its own backups). Every instance has this line;
+              # --once-per makes the first to claim the run export and the rest skip.
               if [ "$DATABASE_MODE" = postgres ]; then
                 printf '%s\n' \
-                  '15 7 * * * root docker exec kb python -m kb.cli export-sqlite >> /var/log/kb-backup.log 2>&1' \
+                  '15 7 * * * root docker exec kb python -m kb.cli export-sqlite --once-per 3600 >> /var/log/kb-backup.log 2>&1' \
                   > /etc/cron.d/kb-backup
               else
                 printf '%s\n' \

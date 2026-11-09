@@ -20,6 +20,7 @@ import shutil
 import sqlite3
 import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -243,6 +244,49 @@ def export_to(
             shutil.copyfile(built, dest)
             result.uploaded = str(dest)
     return result
+
+
+SCHEDULED_EXPORT_KEY = "scheduled_export_at"
+
+
+def claim_scheduled_export(store: Store, window_seconds: int, *, now: datetime | None = None) -> str | None:
+    """Claim the scheduled export for this run, so one instance of the group does it.
+
+    Every instance has the same cron line, so with 2 to 4 instances the export
+    would run once per instance. The claim is a `settings` row read and written
+    inside one write transaction (the advisory write lock serializes the
+    instances): the first caller whose last claim is older than
+    `window_seconds` (or missing) records `now` and gets the previous value
+    back (`""` when there was none) to hand to `release_scheduled_export` if
+    the export fails; every later caller in the window gets None and skips.
+    """
+    if window_seconds <= 0:
+        raise ValueError("window_seconds must be greater than 0")
+    from kb.store import pg_state
+
+    now = now or datetime.now(timezone.utc)
+    with store.transaction():
+        previous = pg_state.get_setting(store, SCHEDULED_EXPORT_KEY)
+        if previous:
+            try:
+                last = datetime.fromisoformat(previous.replace("Z", "+00:00"))
+            except ValueError:
+                last = None
+            if last is not None and now - last < timedelta(seconds=window_seconds):
+                return None
+        pg_state.set_setting(store, SCHEDULED_EXPORT_KEY, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    return previous or ""
+
+
+def release_scheduled_export(store: Store, previous: str) -> None:
+    """Undo a claim after a failed export, so a retry within the window is not skipped."""
+    from kb.store import pg_state
+
+    with store.transaction():
+        if previous:
+            pg_state.set_setting(store, SCHEDULED_EXPORT_KEY, previous)
+        else:
+            store.execute("DELETE FROM settings WHERE key = ?", (SCHEDULED_EXPORT_KEY,))
 
 
 def import_from(

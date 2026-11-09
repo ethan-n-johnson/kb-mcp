@@ -372,3 +372,76 @@ def test_ids_deleted_from_the_top_are_not_reused_in_either_direction(pg_store: S
     portable.import_sqlite(pg_store, out, force=True)
     again = service.upload(pg_store, UploadRequest(content="# Again\n\n" + "text " * 60), "t")
     assert again.doc_id == 7
+
+
+# --- one scheduled export per group (phase 25.2) -------------------------------------
+
+
+@pg
+def test_only_the_first_instance_claims_the_scheduled_export(pg_store: Store) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from kb.config import Settings
+    from kb.store import open_store
+
+    other = open_store(Settings.from_env())  # a second instance's connection
+    t0 = datetime(2026, 11, 9, 7, 15, tzinfo=timezone.utc)
+    try:
+        assert portable.claim_scheduled_export(pg_store, 3600, now=t0) == ""
+        assert portable.claim_scheduled_export(other, 3600, now=t0 + timedelta(seconds=20)) is None
+        assert portable.claim_scheduled_export(pg_store, 3600, now=t0 + timedelta(minutes=59)) is None
+        # The next night is outside the window again.
+        assert portable.claim_scheduled_export(other, 3600, now=t0 + timedelta(days=1)) == "2026-11-09T07:15:00Z"
+    finally:
+        other.close()
+
+
+@pg
+def test_a_failed_export_releases_its_claim(pg_store: Store) -> None:
+    from datetime import datetime, timezone
+
+    t0 = datetime(2026, 11, 9, 7, 15, tzinfo=timezone.utc)
+    previous = portable.claim_scheduled_export(pg_store, 3600, now=t0)
+    assert previous == ""
+    portable.release_scheduled_export(pg_store, previous)
+    assert portable.claim_scheduled_export(pg_store, 3600, now=t0) == ""
+
+
+@pg
+@mock_aws
+def test_cli_once_per_exports_once_and_then_skips(
+    pg_store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    portable.import_sqlite(pg_store, build_sqlite(tmp_path / "source.db"))
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="kb-x")
+    monkeypatch.setenv("KB_BUCKET", "kb-x")
+    assert cli.main(["export-sqlite", "--once-per", "3600"]) == 0
+    assert "exported: s3://kb-x/snapshots/kb-latest.db.gz" in capsys.readouterr().out
+    assert cli.main(["export-sqlite", "--once-per", "3600"]) == 0
+    assert "skipped" in capsys.readouterr().out
+    # A manual export (no --once-per) is never skipped.
+    assert cli.main(["export-sqlite"]) == 0
+    assert "exported:" in capsys.readouterr().out
+
+
+@pg
+def test_cli_once_per_releases_the_claim_when_the_upload_fails(
+    pg_store: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from kb.backup import BackupError
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise BackupError("upload refused")
+
+    monkeypatch.setattr(portable, "export_to", fail)
+    assert cli.main(["export-sqlite", "--to", "s3://kb-x/k.db.gz", "--once-per", "3600"]) == 1
+    assert "export failed" in capsys.readouterr().err
+    assert portable.claim_scheduled_export(pg_store, 3600) == ""
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "soon"])
+def test_cli_once_per_must_be_a_positive_number(value: str, capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["export-sqlite", "--once-per", value])
+    assert exc.value.code == 2

@@ -22,7 +22,7 @@ Status words: not started, in progress, implemented (code written), tested (loca
 | Sub-phase | Before phase 25 | Phase 25 work | Status |
 | --- | --- | --- | --- |
 | 25.1 Shared search | Implemented and tested in phases 20 and 21; deployed in account `983926826929` | Pool checks each connection before use (RDS failover) | tested (SQLite legs; the `pg` legs need `KB_TEST_DATABASE_URL`, see 25.1) |
-| 25.2 Scale-out | Implemented, tested and deployed in phases 22, 23, 23a | One nightly export per group, not one per instance; single NAT gateway documented | not started |
+| 25.2 Scale-out | Implemented, tested and deployed in phases 22, 23, 23a | One nightly export per group, not one per instance; single NAT gateway documented | tested (SQLite legs; `pg` legs need `KB_TEST_DATABASE_URL`) |
 | 25.3 Health checks | `/healthz` only, and the ALB uses it; it returns 503 when the database is unreachable for 60 s | `/livez` for the ALB, `/healthz` stays the readiness check | not started |
 | 25.4 Write auth | Implemented and tested in phase 24 (MCP), phases 05 to 16 (REST, UI) | Audit every write route and tool; fill test gaps only | not started |
 | 25.5 Backups | 1 day RDS retention, `DeletionPolicy: Delete`, no deletion protection; S3 export nightly | Retention 7, snapshot on delete and replace, protection parameter, teardown script, probe, `docs/RECOVERY.md` | not started |
@@ -64,7 +64,17 @@ Account `834269865094` (AWS Academy Learner Lab, role `voclabs`), not the Cloud 
 
 **Default mode decision (user, pending).** SQLite stays the default. Changing it to `postgres` adds the `kb-db` stack (Multi-AZ `db.t3.micro` about 0.034 USD per hour plus 20 GB gp2 Multi-AZ about 4.60 USD per month), a second t3.medium (minimum 2 instances), and 10 to 25 minutes to the first deploy. Migration is automatic (the first boot imports the S3 snapshot into an empty database). Until 25.5 is deployed, deleting `kb-db` destroys the database; only the S3 export and the laptop copy remain.
 
-## 25.2 to 25.6
+## 25.2 Multi-AZ Auto Scaling, 2 to 4 instances
+
+**Evidence it exists:** `infra/app.yaml` `Mappings: Capacity` (`postgres`: min 2, desired 2, max 4; `sqlite`: 1/1/1), `VPCZoneIdentifier` with `kb-PrivateSubnetA` and `kb-PrivateSubnetB`, `HealthCheckType: ELB`, `AutoScalingRollingUpdate` (`MinInstancesInService` 1, `MaxBatchSize` 1, `WaitOnResourceSignals`), target tracking on `ASGAverageCPUUtilization` 50, `MetricsCollection` (`GroupInServiceInstances`), deregistration delay 30 s. Shared state in the database: `upload_tickets` and the `settings` row `fallback` (`tests/test_scale_out.py`, two app instances on one database). `tests/test_infra.py` pins the capacity per mode, the policy and the update policy. Historical (account `983926826929`): instances in us-east-1a and us-east-1b, rolling redeploy and failover drill (phase 22), scale-out to 4 and back (phases 23, 23a, 24 run3). Not re-verifiable in account `834269865094` (nothing deployed).
+
+**Gap 1, the nightly export ran once per instance.** The same cron line is on every instance, so 2 to 4 exports wrote the same S3 key at 07:15 UTC. Fix: `export-sqlite --once-per SECONDS`. Inside one write transaction (the advisory write lock serializes the instances) it reads the `settings` row `scheduled_export_at`; if that is younger than the window the command prints `skipped` and exits 0, otherwise it records the time and exports. A failed export puts the previous value back, so a retry is not skipped. Manual exports (`POST /api/admin/export`, `infra/up.sh save`, `export-sqlite` without the flag) are never skipped. The cron uses `--once-per 3600`. A `pg_try_advisory_lock` alone (the open issue's suggestion) was not enough: instance clocks and cron start times differ by seconds, so a second instance could start after the first released the lock and export again.
+
+**Gap 2, one NAT gateway (documented, not changed).** Both private subnets use one route table whose default route goes to one NAT gateway in AZ a. If AZ a fails, instances in AZ b keep serving searches and reads (models on the instance, RDS in the VPC, S3 through the gateway endpoint), but `ingest_url` cannot fetch and no new instance can boot (`dnf install`, `cfn-signal`), so the group cannot replace capacity. The fix is a second NAT gateway in AZ b and a second private route table in `kb-network` (about 33 USD per month more). Left out for sandbox credit; `docs/SECURITY_REVIEW.md` limitation 24.
+
+**Tests:** `tests/test_portable.py` (`pg`: only the first of two connections claims within the window, the next night claims again, a failed export releases the claim, the CLI exports once and then skips, a manual export is never skipped, a failed upload releases the claim; everywhere: `--once-per` must be a positive whole number), `tests/test_infra.py` (the cron line).
+
+## 25.3 to 25.6
 
 Filled in as each sub-phase is done.
 

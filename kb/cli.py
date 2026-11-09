@@ -163,6 +163,17 @@ def _stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _positive_int(value: str) -> int:
+    """argparse type: an integer greater than 0."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a whole number") from None
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return number
+
+
 def _postgres_mode(command: str, settings: "Settings", instead: str = "export-sqlite") -> bool:
     """Print an error and return True when `command` (a SQLite file operation) cannot run."""
     if not settings.database_url:
@@ -429,10 +440,19 @@ def cmd_export_sqlite(args: argparse.Namespace) -> int:
         return 1
     store = open_store(settings)
     try:
-        result = portable.export_to(store, target, region=settings.aws_region)
-    except (BackupError, ValueError) as exc:
-        print(f"error: export failed: {exc}", file=sys.stderr)
-        return 1
+        claim: str | None = None
+        if args.once_per is not None:
+            claim = portable.claim_scheduled_export(store, args.once_per)
+            if claim is None:
+                print(f"skipped: another instance exported within the last {args.once_per} s")
+                return 0
+        try:
+            result = portable.export_to(store, target, region=settings.aws_region)
+        except (BackupError, ValueError) as exc:
+            if claim is not None:
+                portable.release_scheduled_export(store, claim)
+            print(f"error: export failed: {exc}", file=sys.stderr)
+            return 1
     finally:
         store.close()
     print(f"exported: {result.uploaded}")
@@ -578,6 +598,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export.add_argument(
         "--to", metavar="DEST", default=None, help="s3://<bucket>/<key> or a local file (default: the snapshot in KB_BUCKET)"
+    )
+    export.add_argument(
+        "--once-per",
+        metavar="SECONDS",
+        type=_positive_int,
+        default=None,
+        help="scheduled run: skip if any instance already exported within SECONDS (the nightly cron uses 3600)",
     )
     export.set_defaults(func=cmd_export_sqlite)
 
