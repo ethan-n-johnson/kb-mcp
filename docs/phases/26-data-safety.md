@@ -25,7 +25,7 @@ No command can lose the corpus, and every phase 25 behavior has a committed test
 
 ## Out of scope
 
-Everything in phases 27 to 31. Changes to `infra/teardown-db.sh` (it has its own working check). Any AWS call. The real `~/.config/kb-mcp` is never touched: tests use temporary directories.
+Everything planned after phase 26. Changes to `infra/teardown-db.sh` (it has its own working check). Any AWS call. The real `~/.config/kb-mcp` is never touched: tests use temporary directories.
 
 ## Acceptance
 

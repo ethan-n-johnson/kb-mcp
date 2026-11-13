@@ -9,7 +9,7 @@ Review of kb-mcp after phase 25 and the plan for the remaining phases. Written 2
 | **Implemented and locally tested** (SQLite run, template tests, stand-in AWS commands) | `/livez` and `/healthz` split; write-route classification and token checks; export claim on SQLite; RDS backup settings, deletion protection, Snapshot policies in `infra/db.yaml`; `teardown-db.sh` and `restore-test-db.sh` logic; alarms and dashboards in `infra/app.yaml`; dated laptop copies |
 | **Tested only in a temporary PostgreSQL environment** (PostgreSQL 16.2, pgvector 0.6.2, laptop scratch directory, 2026-11-08; no longer running) | Pool connection check and the failover test; export claim and its release on failure under the advisory lock; `/livez` with a stale health monitor; all 292 PostgreSQL-only test legs. Never run on pgvector 0.8 (CI) |
 | **Not yet verified in AWS** (this account) | Everything from phase 25: deploys, `/livez` as the ALB check, alarms receiving data, SNS email, RDS backups, deletion protection, final snapshot, restore, scale-out with the export claim |
-| **Recommended future work** | Phases 26 to 31 (section 7); the most urgent is the `infra/up.sh save` fix (section 5, finding 1) |
+| **Remaining work** | Phase 26 done (2026-11-13); phases 27 to 31 as planned were replaced by one final wrap-up, the new phase 27 (section 7) |
 
 SQLite is the default database (`DatabaseMode=sqlite`, one instance); PostgreSQL on RDS is optional (`KB_DATABASE_MODE=postgres` in `~/.config/kb-mcp/up.env`, 2 to 4 instances) and meant for a temporary session.
 
@@ -114,8 +114,8 @@ Status: **complete**, **needs test**, **needs code**, **needs AWS**, **HUMAN**, 
 | T7 | A PostgreSQL export restored by the SQLite boot path (the switch back after an RDS session) | needs test | P1 |
 | T8 | App startup when `config/database-url` is missing in PostgreSQL mode: clear failure, no empty database | needs test | P2 |
 | T9 | Failure scenarios (table 6.6): most have tests; gaps are T6, T8 and the killed-export claim window (documentation only) | partly complete | P1 |
-| T10 | Live verification of everything in sections 6.2 and 6.4 | needs AWS | P0 (phase 29) |
-| T11 | Real RDS failover and restore | needs AWS and separate approval | P2 (phase 30) |
+| T10 | Live verification of everything in sections 6.2 and 6.4 | needs AWS | Done for `postgres` mode on 2026-11-13 (`docs/phases/27-final-wrap-up.md`); `sqlite` mode not planned |
+| T11 | Real RDS failover and restore | needs AWS and separate approval | Not planned |
 
 Only mocked or stubbed so far (verified by reading the tests): S3 via moto; SSM token source via moto; every shell script with stand-in `aws` and `curl`; CloudFormation only linted, validated and parsed; the metrics sender.
 
@@ -175,7 +175,7 @@ Optional, free, no new deployment: **CloudTrail event history** (allowed in the 
 | P2 | `docs/SETUP.md`: Docker in WSL, preflight, leftover check | needs update | P1 |
 | P3 | README cost notes: missing public IPv4, SQLite-only total, alarm cost, final RDS snapshots | needs update | P1 |
 | P4 | `docs/DEMO.md` is written for the 4-instance PostgreSQL class session; needs a SQLite demo sequence with a fallback per step and the optional PostgreSQL segment | needs update | P1 |
-| P5 | `docs/RECOVERY.md`, `docs/ALARMS.md` status tables after phases 29 and 30 | after AWS phases | P1 |
+| P5 | `docs/RECOVERY.md`, `docs/ALARMS.md` status tables after phases 29 and 30 | phase 27 (from the 2026-11-13 live test) | P1 |
 | P6 | One consolidated AWS Academy limitations table (today spread over PROGRESS, SECURITY_REVIEW, README) | missing | P2 |
 | P7 | `docs/PROGRESS.md`: record finding 3 (earlier `kb-app` in this account) | missing | P3 |
 | P8 | Phase 24 open acceptance items: extension tested in Chrome, final deck, CI green, GitHub matches the laptop (`docs/phases/24-final-wrap.md`) | HUMAN, teammate coordination | P1 |
@@ -187,9 +187,9 @@ Optional, free, no new deployment: **CloudTrail event history** (allowed in the 
 | --- | --- | --- | --- |
 | S3 unavailable at boot | Boot retries, then fails rather than starting empty | `tests/test_backup.py`, `tests/test_portable.py`, user data tests | None |
 | S3 unavailable at runtime (SQLite) | Writes succeed, snapshot retried | `tests/test_snapshot.py` | None |
-| Database unavailable (PostgreSQL) | `/healthz` 503, `/livez` 200, no instance replaced | `tests/test_health.py` (25.3) | Live (phase 30) |
-| Connection loss (failover) | Pool replaces dropped connections | `tests/test_postgres_app.py` (25.1) | Live (phase 30) |
-| Instance terminated or stuck | ALB marks it unhealthy, group replaces it, SQLite restores the snapshot | Template tests; historical drills | Live (phase 29) |
+| Database unavailable (PostgreSQL) | `/healthz` 503, `/livez` 200, no instance replaced | `tests/test_health.py` (25.3) | Live failover not planned |
+| Connection loss (failover) | Pool replaces dropped connections | `tests/test_postgres_app.py` (25.1) | Live failover not planned |
+| Instance terminated or stuck | ALB marks it unhealthy, group replaces it, SQLite restores the snapshot | Template tests; historical drills | Live drill not planned |
 | Corrupt backup | SQLite boot refuses it and uses an older one; `teardown-db.sh` refuses a damaged laptop copy | Tests | **`up.sh save` (T6)** |
 | Invalid token | 401 or tool error, nothing written | Every write path | None |
 | Token store unreadable | Writes refused | Tests | None |
@@ -214,58 +214,15 @@ Order: protect the data first, then close local test gaps, then make deployments
 - **Done when:** all tests pass on SQLite and PostgreSQL; the real `~/.config/kb-mcp` is untouched (checksum unchanged).
 - **AWS or cost:** none. **Approval:** yes, to start (local code).
 
-### Phase 27: Deployment readiness
+### Phases 27 to 31 as first planned: replaced (user decision, 2026-11-13)
 
-- **Objective:** a deploy in a fresh lab account succeeds or stops early with a clear reason, and cleanup is provably complete.
-- **Why:** the only recorded failure in a lab account was a permission denial halfway through (finding 4); template headroom is about 840 bytes before the size test fails; the dirty tag forces rebuilds.
-- **Files:** `infra/deploy.sh`, `infra/up.sh`, `infra/push-image.sh`, new `infra/preflight.sh` and `infra/leftovers.sh`, `infra/teardown-app.sh`, `tests/test_infra.py`, `docs/SETUP.md`, README.
-- **Changes:** D3 (S3 template upload and `validate-template --template-url`), D4, D5, D6, D10. Raise the template size test only after S3 upload works.
-- **Tests:** stand-in tests for the new scripts and flags; `cfn-lint`; `shellcheck`.
-- **CI (approval needed separately):** push the branch and open a draft pull request, or run the workflow by hand, so the PostgreSQL legs run on pgvector 0.8 (T1).
-- **Docs:** SETUP (Docker in WSL, preflight, leftovers), README, phase file, PROGRESS.
-- **Dependencies:** none (may run alongside 26). **Risks:** a wrong S3 upload flow breaks every deploy; phase 29 is its first real use. **Complexity:** medium. **Priority:** P1 (T1 P0).
-- **Done when:** tests pass; the preflight passes read-only against this account; CI green (if approved).
-- **AWS or cost:** read-only calls only; a push and PR are outward-facing. **Approval:** yes (code), and separately for the push and PR.
+The user decided on no more phases except a final wrap-up. The planned phases 27 (deployment readiness: preflight, S3 template upload, leftover check, clean image tag), 28 (security hardening), 29 (live SQLite deployment), 30 (temporary PostgreSQL session) and 31 (final documentation) are dropped. Their items stay listed in section 6 as **not planned**. Instead, a live test of the `postgres` mode ran on 2026-11-13 (results in `docs/phases/27-final-wrap-up.md`), and the old phase 31 became the new phase 27.
 
-### Phase 28: Security hardening (optional)
+### Phase 27: Final wrap-up
 
-- **Objective:** close the two cheapest real gaps.
-- **Why:** both are real improvements for free; neither is needed for the demo to run.
-- **Files:** `infra/data.yaml`, `infra/app.yaml`, `infra/deploy.sh`, `infra/up.sh`, `tests/test_infra.py`, `tests/test_infra_security.py`, `docs/SECURITY_REVIEW.md`.
-- **Changes:** S1, S2 (secret generated on the laptop like the tokens, never printed), S3, S4.
-- **Tests:** template tests (policy statement, listener rule, secret never in outputs).
-- **Dependencies:** 27 (template size). **Risks:** a wrong listener rule blocks all traffic; a wrong bucket policy blocks the instances' S3 access. Both verified in phase 29. **Complexity:** medium. **Priority:** P2.
-- **Done when:** tests pass; SECURITY_REVIEW lists the checks to run in phase 29.
-- **AWS or cost:** none. **Approval:** yes, including whether it is in scope.
-
-### Phase 29: Live SQLite deployment and verification
-
-**Not needed for this submission** (user decision, 2026-11-13: no video is required; the user will test live before the demo). Kept as the checklist for that test.
-
-- **Objective:** prove the default architecture in this account and collect the presentation evidence.
-- **Why:** nothing has been verified live in this account since phase 25; the demo depends on it.
-- **Steps:** preflight; `infra/up.sh` (SQLite); confirm the SNS email (HUMAN); `scripts/demo_check.sh`; SECURITY_REVIEW verification commands; each alarm's metric has data; `set-alarm-state` email test; instance replacement drill (`set-instance-health Unhealthy`), timed, with emails; CloudFront cache headers; writes with and without a token; update the Claude Code MCP entry (finding 6, HUMAN); screenshots; `infra/up.sh save` (with the phase 26 checks); `teardown-app.sh`; leftover check.
-- **Files:** `docs/PROGRESS.md`, phase file, ALARMS and RECOVERY status tables. Code only for defects the deploy reveals, each with a test and its own commit.
-- **Dependencies:** 26, 27 (28 if in scope); D1, D2. **Risks:** permissions differ from the simulator; a failed rollback leaves an Elastic IP. **Complexity:** medium. **Priority:** P0.
-- **Done when:** demo check passes; every SQLite-mode alarm shows data or a reasoned no-traffic state; one alarm email received; replacement timed; afterwards only `kb-network` and `kb-data` remain.
-- **AWS or cost:** creates `kb-network`, `kb-data`, `kb-app`; about $0.13 per hour, about $0.40 for a 3-hour session. **Approval:** yes, with a date.
-
-### Phase 30: Temporary PostgreSQL session (optional)
-
-- **Objective:** demonstrate RDS, shared storage across 2 to 4 instances in two AZs, backups and recovery without changing the default.
-- **Steps:** `KB_DATABASE_MODE=postgres` for this session only; `infra/up.sh` (creates `kb-db`, imports the laptop copy); two instances in two AZs; `infra/class-capacity.sh up` to 4 and back, or load to trigger CPU scaling; RDS alarms and dashboard; optional forced failover and optional `restore-test-db.sh` (each separately approved); `up.sh save`; `teardown-app.sh`; `teardown-db.sh`; decide about the final snapshot; switch back; next SQLite deploy restores the export (T7 tested first).
-- **Dependencies:** 29, T7. **Risks:** a forgotten `kb-db` bills about $0.04 per hour; final snapshots stay; data loss at the switch back is covered by T6 and T7. **Complexity:** high. **Priority:** P2.
-- **Done when:** scale-out and back recorded; RDS alarms show data; restore check (if approved) prints `RESTORE CHECK PASSED` and cleans up; both stacks deleted; SQLite mode back with the same document count.
-- **AWS or cost:** about $0.22 per hour (2 instances, Multi-AZ), about $0.66 for 3 hours, under $0.10 for the restore test, plus snapshot storage if kept. **Approval:** yes, per step.
-
-### Phase 31: Final documentation and presentation
-
-- **Objective:** documents and slides say only what was verified.
-- **Changes:** P1 to P9; this roadmap marked done; every README and DEMO claim linked to a PROGRESS entry.
-- **Dependencies:** 29 (and 30 if run). **Risks:** claims outrunning evidence. **Complexity:** low to medium. **Priority:** P1.
-- **Done when:** the completion checklist (section 11) is all ticked. **AWS or cost:** none. **Approval:** yes, to start.
-
-**Estimate:** 6 phases (26, 27, 29 and 31 required; 28 and 30 optional), 7 to 10 commits.
+- **Objective:** documents say only what was verified; the project is marked finished.
+- **Phase file:** `docs/phases/27-final-wrap-up.md` (with the live test results of 2026-11-13).
+- **Changes:** P1, P3 to P5, P7, P8 where the live test settled them; this roadmap marked complete. **AWS or cost:** none.
 
 ## 8. AWS configuration comparison
 
@@ -280,7 +237,7 @@ Order: protect the data first, then close local test gaps, then make deployments
 
 **Recommendation:** run Option A as the main demonstration, and explain Option B's limit on one slide rather than building it. Add Option C as a short, separate session only if the presentation needs live scale-out and RDS; otherwise present the phase 22 to 24 load-test evidence, clearly labeled as from the teammate's account. A gives the best value per dollar; C adds the two things A cannot show (shared state across instances and managed database recovery).
 
-Nothing here is confirmed deployable in this account until the phase 27 preflight passes and phase 29 runs.
+Option C was deployed and verified in account `983926826929` on 2026-11-13 (`docs/phases/27-final-wrap-up.md`). Option A (SQLite) was not deployed after phase 25.
 
 ## 9. Cost and cleanup
 
@@ -302,39 +259,33 @@ Required cleanup after each session: `infra/up.sh save`; `infra/teardown-app.sh`
 | Risk | Likelihood | Impact | Mitigation |
 | --- | --- | --- | --- |
 | Corpus lost through `up.sh save` | Medium once deploys start | Severe, irreversible | Phase 26 fixed it (2026-11-13): the old copy is kept and a damaged or smaller download is refused |
-| No Docker, so no deploy | Certain today | Blocks 29 and 30 | D1 (HUMAN) |
+| No Docker, so no deploy | Resolved | n/a | The 2026-11-13 deploy ran from a laptop with Docker |
 | Lab permissions differ from the simulator | Medium | A failed deploy, leftovers | Preflight (D4), leftover check (D6) |
-| pgvector 0.8 behaves differently from 0.6.2 | Low | PostgreSQL mode broken | T1 before merge or phase 30 |
-| Template too large after one more change | High if templates grow | Deploy refused | D3 before phase 28 |
+| pgvector 0.8 behaves differently from 0.6.2 | Low | PostgreSQL mode broken | CI runs on pgvector 0.8 (green for PR #10, 2026-11-13) |
+| Template too large after one more change | High if templates grow | Deploy refused | D3 (not planned); `app.yaml` was 49,334 bytes and deployed fine on 2026-11-13 |
 | Credentials expire mid-deploy | Medium | Half-finished stack | Start each AWS phase with fresh credentials; the scripts stop on `ExpiredToken` |
 | Forgotten resources | Medium | Cost | D6 after every session |
 | Teammate's repository diverges | Medium | Merge conflicts | Coordinate before pushing (P8) |
 
-Dependencies: 26 and 27 have none; 28 needs 27; 29 needs 26, 27, D1 and D2; 30 needs 29 and T7; 31 needs 29.
+Dependencies: phase 27 (final wrap-up) needs phase 26 and the 2026-11-13 live test, both done.
 
 ## 11. Final project completion checklist
 
 - [x] Phase 26: save path safe; T2 to T8 committed and passing (2026-11-13)
-- [ ] Phase 27: preflight, S3 template upload, leftover check, clean image tag
-- [ ] CI green on the branch, including PostgreSQL legs on pgvector 0.8 (approval for push and PR)
-- [ ] Phase 28 done or explicitly out of scope
-- [ ] Docker in WSL enabled (HUMAN)
-- [ ] Phase 29: live SQLite deployment verified, evidence collected, torn down, no leftovers (not needed for this submission; the user tests live before the demo)
-- [ ] Laptop backup still intact (63 documents) after the live session, plus a dated copy
-- [ ] Phase 30 done or explicitly skipped (with the historical evidence labeled)
-- [ ] Claude Code MCP entry updated or removed (HUMAN)
-- [ ] Phase 24 leftovers: extension tested, deck, GitHub matches the laptop (teammate)
-- [ ] README, SETUP, DEMO, RECOVERY, ALARMS, SECURITY_REVIEW match the verified state
-- [ ] Presentation and demo script with fallbacks rehearsed
-- [ ] No kb resources billing in the account except `kb-network` and `kb-data`
+- [x] CI green, including PostgreSQL legs on pgvector 0.8 (PR #10 and `master`, 2026-11-13)
+- [x] Live deployment verified, evidence collected, torn down, no leftovers (`postgres` mode, 2026-11-13)
+- [x] Laptop backup intact after the live session, plus dated copies (79 docs, 1089 chunks, `saved/` has 2 copies)
+- [x] Claude Code MCP entry updated (HUMAN, 2026-11-13)
+- [x] Extension tested in Chrome (HUMAN, 2026-11-13)
+- [x] No kb resources billing in the account except `kb-network`, `kb-data` and, until the user deletes it, the final RDS snapshot
+- [ ] Phase 27: README, SETUP, DEMO, RECOVERY, ALARMS, SECURITY_REVIEW match the verified state
+- [ ] Deck and rehearsal (HUMAN)
+- Out of scope (user decision 2026-11-13): the planned phases 27 to 30 (preflight and S3 template upload, security hardening, a live SQLite session, an RDS failover and restore test)
 
-## 12. Decisions needed
+## 12. Decisions
 
 1. Done 2026-11-13: phase 26.
-2. Optionally approve a one-time manual dated copy of `~/.config/kb-mcp/kb-latest.db.gz` (a copy only; the original is not touched).
-3. Enable Docker Desktop WSL integration (HUMAN).
-4. Approve phase 27, and separately a draft pull request or a manual workflow run so CI runs (the branch push itself is done).
-5. Phase 28 in or out of scope.
-6. Approve phase 29 and pick a date with fresh credentials.
-7. Phase 30 in or out; separately, the forced failover and the RDS restore test; and whether to keep final RDS snapshots.
-8. Done 2026-11-09: this roadmap is committed, and findings 1 to 6 are recorded under "Open issues" in `docs/PROGRESS.md`.
+2. Done 2026-11-13: no more phases except the final wrap-up (the new phase 27); the planned 27 to 31 are dropped.
+3. Done 2026-11-13: a live test of the `postgres` mode instead of the planned SQLite session.
+4. Open (user): keep or delete the final RDS snapshot `kb-db-snapshot-db-uz70pqrr8z1u`.
+5. Done 2026-11-09: this roadmap is committed, and findings 1 to 6 are recorded under "Open issues" in `docs/PROGRESS.md`.
