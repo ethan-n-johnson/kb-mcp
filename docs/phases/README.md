@@ -65,12 +65,12 @@ Phase 1 (00 to 16, plus the upload links) is the working single-instance prototy
 | 22 | [Stateless app and scale-out](22-stateless-scale-out.md) | Sun Nov 8 to Mon Nov 9 | local, then AWS | 21 | screenshots | |
 | 23 | [Load test and scaling evidence](23-load-test.md) | Tue Nov 10 | laptop + AWS | 22 | run Locust, screenshots | 2nd: a short curl loop instead of Locust |
 | 23a | [Health check and admission control under load](23a-health-under-load.md) | done Nov 6 | laptop + AWS | 23 | run Locust | |
-| 24 | [Final README, extension, submission](24-final-wrap.md) | Wed Nov 11 to Thu Nov 12 | local + AWS | 23, 23a | extension, run3 Locust (50 users), MCP write decision, rehearsal, video | 1st: extension; 3rd: full DEMO.md |
-| 25 | [Product priorities: shared search, scale-out, health, auth, backups, alarms](25-product-priorities.md) | done locally Nov 8 (not deployed) | local, then AWS (approval needed) | 24 | approve deploys and the restore test, confirm SNS email | |
+| 24 | [Classroom readiness, README, extension](24-classroom-readiness.md) | Wed Nov 11 to Thu Nov 12 | local + AWS | 23, 23a | extension, run3 Locust (50 users), MCP write decision, rehearsal, video | 1st: extension; 3rd: full DEMO.md |
+| 25 | [Product priorities: shared search, scale-out, health, auth, backups, alarms](25-product-priorities.md) | done locally Nov 8, deployed and checked live Nov 13 | local, then AWS (approval needed) | 24 | approve deploys and the restore test, confirm SNS email | |
 | 26 | [Data safety and local test gaps](26-data-safety.md) | done Nov 13 | local | 25 | | |
-| 27 | [Final wrap-up](27-final-wrap-up.md) | next | local | 26, live test of Nov 13 (done) | deck, rehearsal | |
+| 27 | [Final wrap-up](27-final-wrap-up.md) | done Nov 13 | local | 26, live test of Nov 13 (done) | deck, rehearsal | |
 
-The planned phases 27 to 31 of `docs/FINAL_PROJECT_ROADMAP.md` were replaced on Nov 13 (user decision) by one final wrap-up, the new phase 27. A live test of the `postgres` mode ran the same day; its results are in the phase 27 file.
+The planned phases 27 to 31 of `docs/FINAL_PROJECT_ROADMAP.md` were replaced on Nov 13 (user decision) by one final wrap-up, the new phase 27. A live test of the `postgres` mode ran the same day; its results are in the phase 27 file. **The project is complete**; only the deck, the rehearsal and the submission remain (HUMAN).
 
 Replanned Nov 6: 19 and 20 finished early (Oct 29), then a week passed, so there is no buffer day left. Submit Fri Nov 13. Phase 18 (the Lambda) is dropped: EventBridge is not on the sandbox list.
 

@@ -40,16 +40,41 @@ Not tested live (say so wherever they are mentioned): RDS point-in-time restore 
 2. `README.md`: the extension status (tested 2026-11-13); phases 25 and 26 in the status or results section as verified live on 2026-11-13 (with the list of what was not tested); the save behavior; the cost notes stay as they are unless they contradict the live run.
 3. `docs/DEMO.md`, `docs/RECOVERY.md`, `docs/ALARMS.md`: status tables updated from "not deployed" to the live results where the table above covers them; the `kb-no-healthy-host` startup alarm and its 7 minute clear noted in `docs/ALARMS.md`.
 4. `docs/FINAL_PROJECT_ROADMAP.md`: marked complete; section 11 checklist ticked or marked out of scope.
-5. `docs/phases/24-final-wrap.md`: tick the acceptance items the live test settled (extension tested, demo check, CI green, GitHub matches); leave the deck and rehearsal to the user.
+5. `docs/phases/24-classroom-readiness.md`: tick the acceptance items the live test settled (extension tested, demo check, CI green, GitHub matches); leave the deck and rehearsal to the user.
 6. A short list for the user's deck: the verified numbers and where each is recorded (no slides are written in this phase).
 
 ## Out of scope
 
 Any code, template or test change (record a defect under "Open issues" instead). Any AWS call. The deck itself, the rehearsal and the submission (HUMAN).
 
+## Deck numbers (task 6)
+
+Every number below is verified and recorded; cite the source on the slide or in the notes.
+
+| Topic | Number | Where it is recorded |
+| --- | --- | --- |
+| Search quality | hit@1 94 percent, hit@5 94 percent on SQLite and on pgvector (identical ranks); every out-of-corpus question `low` | README Results; PROGRESS row 21 |
+| Search latency | 2.33 to 2.64 s per semantic search through CloudFront on a t3.medium (RDS); 0.6 to 0.7 s locally | README Results; PROGRESS rows 11 and 21 |
+| Near-duplicate detection | planted copy 0.9989, closest distinct pair 0.9300, cutoff 0.96 | README Results; PROGRESS row 11 |
+| Health check bug found by load | run1: 76.36 percent failures (all 502), both instances killed by the ALB check | README Results; PROGRESS row 23 |
+| The fix | run2: 0 failures in 6548 requests (30 users), 0 instances killed; `/healthz` p99 130 ms | README Results; PROGRESS row 23a |
+| Classroom load | run3: 50 users, 15 min, 6493 requests, 0 failures, 4 of 4 targets healthy every minute, RDS at most 18 connections and 17 percent CPU | README Results; PROGRESS row 24 |
+| Capacity | about 0.7 semantic searches per second per instance; beyond that keyword answers after a 5 s wait | README Known limitations; PROGRESS rows 23a and 24 |
+| Scale-out | CPU alarm 3 min after load start (run2), about 10 min per new instance under load; pre-class `class-capacity.sh up`: 4 healthy in 2 min 50 s, down in 16 s | README Results; PROGRESS row 24 |
+| Failover | instance marked unhealthy to replacement healthy about 2 min 40 s, 53 of 54 searches 200; rolling redeploy 5 min 19 s, 90 of 91 searches 200 | README Results; PROGRESS row 22 |
+| One-command deploy | empty account to working stack in 27 min 20 s (2026-11-13); 26 min (2026-11-07) | This file, Live test; PROGRESS rows "live test" and 24 |
+| Live check | `demo_check.sh` 14 of 14 PASS; 2 instances in 2 AZs; 12 MCP tools | This file; PROGRESS row "live test" |
+| Monitoring | 11 alarms on AWS-published metrics; `kb-no-healthy-host` clears 7 min after a deploy | `docs/ALARMS.md` Status |
+| Data safety | `up.sh save` kept the old copy and checked the new one (79 docs, 1089 chunks); RDS 7 day backups, deletion protection, final snapshot on delete | `docs/RECOVERY.md` Status; PROGRESS rows 26 and "live test" |
+| Image | 398 MB compressed, 1.24 GB unpacked, delivered through S3 (ECR denied) | This file; README Architecture |
+| Cost | about $0.20 per hour with 2 instances and Multi-AZ RDS, about $0.29 with 4; idle (stacks torn down) well under a cent a day plus any kept RDS snapshot | README Cost notes (prices checked 2026-11-07) |
+| Tests | 1111 passed on SQLite; 1411 passed on SQLite and PostgreSQL (phase 26) | PROGRESS row 26 |
+
+Say on the slides what was not tested live: RDS point-in-time restore, a forced RDS failover, scale-out under load with the phase 25 code, the export claim across instances, the `sqlite` mode deployment since phase 25.
+
 ## Acceptance
 
-- [ ] Every "not deployed", "untested" or "planned" claim in README, DEMO, RECOVERY, ALARMS and the roadmap either matches the live results above or says why it stays untested.
-- [ ] No document claims a live result that is not in the table above or in an earlier PROGRESS row.
-- [ ] `pytest -q` still passes (docs only, as a guard); no em dashes added.
-- [ ] Phase log updated; commit `phase 27: final wrap-up`.
+- [x] Every "not deployed", "untested" or "planned" claim in README, DEMO, RECOVERY, ALARMS and the roadmap either matches the live results above or says why it stays untested.
+- [x] No document claims a live result that is not in the table above or in an earlier PROGRESS row.
+- [x] `pytest -q` still passes (docs only, as a guard); no em dashes added.
+- [x] Phase log updated; commit `phase 27: final wrap-up`.

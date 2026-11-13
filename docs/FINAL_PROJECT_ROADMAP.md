@@ -1,6 +1,6 @@
 # Final project roadmap
 
-Review of kb-mcp after phase 25 and the plan for the remaining phases. Written 2026-11-09 and committed with the phase 25 documentation (commit "docs: phase 25 documentation and final roadmap", on `phase-25-product-priorities`). Phases 26 to 31 are plans: nothing in them has been implemented yet.
+Review of kb-mcp after phase 25 and the plan for the remaining phases. Written 2026-11-09 and committed with the phase 25 documentation (commit "docs: phase 25 documentation and final roadmap", on `phase-25-product-priorities`). **Complete (2026-11-13).** Phase 26 and the final wrap-up (phase 27) are done; the planned phases 27 to 31 were replaced by that wrap-up. Sections 5 to 10 are kept as written on 2026-11-09, with statuses updated where the 2026-11-13 live test settled them.
 
 ## At a glance
 
@@ -8,8 +8,9 @@ Review of kb-mcp after phase 25 and the plan for the remaining phases. Written 2
 | --- | --- |
 | **Implemented and locally tested** (SQLite run, template tests, stand-in AWS commands) | `/livez` and `/healthz` split; write-route classification and token checks; export claim on SQLite; RDS backup settings, deletion protection, Snapshot policies in `infra/db.yaml`; `teardown-db.sh` and `restore-test-db.sh` logic; alarms and dashboards in `infra/app.yaml`; dated laptop copies |
 | **Tested only in a temporary PostgreSQL environment** (PostgreSQL 16.2, pgvector 0.6.2, laptop scratch directory, 2026-11-08; no longer running) | Pool connection check and the failover test; export claim and its release on failure under the advisory lock; `/livez` with a stale health monitor; all 292 PostgreSQL-only test legs. Never run on pgvector 0.8 (CI) |
-| **Not yet verified in AWS** (this account) | Everything from phase 25: deploys, `/livez` as the ALB check, alarms receiving data, SNS email, RDS backups, deletion protection, final snapshot, restore, scale-out with the export claim |
-| **Remaining work** | Phase 26 done (2026-11-13); phases 27 to 31 as planned were replaced by one final wrap-up, the new phase 27 (section 7) |
+| **Verified in AWS on 2026-11-13** (account `983926826929`, `postgres` mode) | Deploy of the phase 25 and 26 code, `/livez` as the ALB check, 11 alarms (those that show missing data received it), SNS subscription, RDS 7 day backups, deletion protection and final snapshot, `up.sh save` and `teardown-db.sh`, Claude Code over MCP, the Chrome extension |
+| **Not verified in AWS** (out of scope, user decision 2026-11-13) | RDS point-in-time restore, a forced RDS failover, scale-out under load with this code (phases 23 and 24 remain the evidence), the export claim across instances, a `sqlite` mode deployment |
+| **Remaining work** | None in the repository. HUMAN: the deck, the rehearsal and the submission; keep or delete the final RDS snapshot |
 
 SQLite is the default database (`DatabaseMode=sqlite`, one instance); PostgreSQL on RDS is optional (`KB_DATABASE_MODE=postgres` in `~/.config/kb-mcp/up.env`, 2 to 4 instances) and meant for a temporary session.
 
@@ -47,12 +48,12 @@ Phase 25 implemented six priorities. Each was verified in this review by its com
 
 | # | Priority | What exists | Evidence | Live status |
 | --- | --- | --- | --- | --- |
-| 1 | PostgreSQL shared search | Pool validates connections before handing them out (`check=ConnectionPool.check_connection`), so connections dropped by an RDS failover are replaced | `kb/store/postgres.py`; `tests/test_postgres_pool.py`; failover test in `tests/test_postgres_app.py` fails without the fix (verified 2026-11-08) | Historical only |
-| 2 | One export per group | `export-sqlite --once-per 3600` claims a `settings` row inside an advisory-locked transaction; claim released on failure | `kb/portable.py`, `kb/cli.py`, `infra/app.yaml` cron; claim tests in `tests/test_portable.py` | Historical only (scale-out phases 22 to 24) |
-| 3 | Independent health checks | `/livez` (no dependencies) for the ALB; `/healthz` (readiness) for `cfn-signal` and `demo_check.sh` | `kb/main.py`, target group `HealthCheckPath: /livez`, `tests/test_health.py` | Not deployed |
-| 4 | Write authentication | Every non-GET route is classified as token-gated (10) or ticket-gated (2); MCP write tools require a token over HTTP | `tests/test_write_routes.py`, `tests/test_mcp.py`, `tests/test_ui.py` | Historical (phase 24) |
-| 5 | Backups and recovery | RDS: 7-day backups, deletion protection, snapshot on delete or replace, `kb-DbInstanceId` export; `infra/teardown-db.sh`, `infra/restore-test-db.sh`; dated laptop copies on save; `docs/RECOVERY.md` | `infra/db.yaml`, scripts, `tests/test_infra.py` with stand-in `aws` commands | Not deployed; **no restore ever run** |
-| 6 | CloudWatch alarms | Alarms read metrics AWS publishes itself (ALB, Auto Scaling, EC2, RDS); custom-metric alarms only when `MetricsMode` is not `off`; dashboards `kb-mcp`, `kb-mcp-db`, `kb-mcp-search` | `infra/app.yaml`, `docs/ALARMS.md`, `tests/test_infra.py` | Not deployed |
+| 1 | PostgreSQL shared search | Pool validates connections before handing them out (`check=ConnectionPool.check_connection`), so connections dropped by an RDS failover are replaced | `kb/store/postgres.py`; `tests/test_postgres_pool.py`; failover test in `tests/test_postgres_app.py` fails without the fix (verified 2026-11-08) | Deployed 2026-11-13 (PostgreSQL mode served all checks); no failover forced |
+| 2 | One export per group | `export-sqlite --once-per 3600` claims a `settings` row inside an advisory-locked transaction; claim released on failure | `kb/portable.py`, `kb/cli.py`, `infra/app.yaml` cron; claim tests in `tests/test_portable.py` | Deployed 2026-11-13; the claim across instances was not observed live (historical scale-out: phases 22 to 24) |
+| 3 | Independent health checks | `/livez` (no dependencies) for the ALB; `/healthz` (readiness) for `cfn-signal` and `demo_check.sh` | `kb/main.py`, target group `HealthCheckPath: /livez`, `tests/test_health.py` | **Live 2026-11-13:** target group checks `/livez`, both targets healthy |
+| 4 | Write authentication | Every non-GET route is classified as token-gated (10) or ticket-gated (2); MCP write tools require a token over HTTP | `tests/test_write_routes.py`, `tests/test_mcp.py`, `tests/test_ui.py` | **Live 2026-11-13:** REST 401 without or with a wrong token, 201 with one; MCP write without a token refused |
+| 5 | Backups and recovery | RDS: 7-day backups, deletion protection, snapshot on delete or replace, `kb-DbInstanceId` export; `infra/teardown-db.sh`, `infra/restore-test-db.sh`; dated laptop copies on save; `docs/RECOVERY.md` | `infra/db.yaml`, scripts, `tests/test_infra.py` with stand-in `aws` commands | Deployed 2026-11-13: `kb-db` created with 7 days and protection, `teardown-db.sh` deleted it with a final snapshot; **no restore run** |
+| 6 | CloudWatch alarms | Alarms read metrics AWS publishes itself (ALB, Auto Scaling, EC2, RDS); custom-metric alarms only when `MetricsMode` is not `off`; dashboards `kb-mcp`, `kb-mcp-db`, `kb-mcp-search` | `infra/app.yaml`, `docs/ALARMS.md`, `tests/test_infra.py` | **Live 2026-11-13:** 11 alarms; those that show missing data received it (`docs/ALARMS.md`) |
 
 Also complete before phase 25 (historical, in `docs/PROGRESS.md`): the application (12 MCP tools, REST, web UI, Chrome extension), both storage backends, S3 snapshots and backups, the four CloudFormation stacks, `infra/up.sh` and teardown scripts, CI workflow, security review, load tests (phases 23 and 23a), demo runbook.
 
@@ -171,15 +172,15 @@ Optional, free, no new deployment: **CloudTrail event history** (allowed in the 
 
 | # | Item | Status | Priority |
 | --- | --- | --- | --- |
-| P1 | README diagrams: add `/livez`, the AWS-metric alarms, SQLite as the default path | needs update | P1 |
-| P2 | `docs/SETUP.md`: Docker in WSL, preflight, leftover check | needs update | P1 |
-| P3 | README cost notes: missing public IPv4, SQLite-only total, alarm cost, final RDS snapshots | needs update | P1 |
-| P4 | `docs/DEMO.md` is written for the 4-instance PostgreSQL class session; needs a SQLite demo sequence with a fallback per step and the optional PostgreSQL segment | needs update | P1 |
-| P5 | `docs/RECOVERY.md`, `docs/ALARMS.md` status tables after phases 29 and 30 | phase 27 (from the 2026-11-13 live test) | P1 |
-| P6 | One consolidated AWS Academy limitations table (today spread over PROGRESS, SECURITY_REVIEW, README) | missing | P2 |
-| P7 | `docs/PROGRESS.md`: record finding 3 (earlier `kb-app` in this account) | missing | P3 |
-| P8 | Phase 24 open acceptance items: extension tested in Chrome, final deck, CI green, GitHub matches the laptop (`docs/phases/24-final-wrap.md`) | HUMAN, teammate coordination | P1 |
-| P9 | Presentation: architecture slide, one slide per service with its role, demo script, failure and monitoring demo, security demo, cost and cleanup slide | missing | P1 |
+| P1 | README diagrams: add `/livez`, the AWS-metric alarms, SQLite as the default path | not planned: diagrams unchanged; `/livez` and the AWS-metric alarms are described in the README text (phase 27) | P1 |
+| P2 | `docs/SETUP.md`: Docker in WSL, preflight, leftover check | not planned (preflight and leftover check dropped 2026-11-13) | P1 |
+| P3 | README cost notes: missing public IPv4, SQLite-only total, alarm cost, final RDS snapshots | final RDS snapshot noted (phase 27); the rest not planned | P1 |
+| P4 | `docs/DEMO.md` is written for the 4-instance PostgreSQL class session; needs a SQLite demo sequence with a fallback per step and the optional PostgreSQL segment | not planned: the demo runs in `postgres` mode, the mode tested live on 2026-11-13 | P1 |
+| P5 | `docs/RECOVERY.md`, `docs/ALARMS.md` status tables after phases 29 and 30 | done in phase 27 (from the 2026-11-13 live test) | P1 |
+| P6 | One consolidated AWS Academy limitations table (today spread over PROGRESS, SECURITY_REVIEW, README) | not planned | P2 |
+| P7 | `docs/PROGRESS.md`: record finding 3 (earlier `kb-app` in this account) | done (open issue closed with a note, phase 27) | P3 |
+| P8 | Phase 24 open acceptance items: extension tested in Chrome, final deck, CI green, GitHub matches the laptop (`docs/phases/24-classroom-readiness.md`) | extension, CI and GitHub done 2026-11-13; final deck HUMAN | P1 |
+| P9 | Presentation: architecture slide, one slide per service with its role, demo script, failure and monitoring demo, security demo, cost and cleanup slide | HUMAN (deck); numbers listed in `docs/phases/27-final-wrap-up.md`, "Deck numbers" | P1 |
 
 ### 6.6 Failure scenarios
 
@@ -278,8 +279,8 @@ Dependencies: phase 27 (final wrap-up) needs phase 26 and the 2026-11-13 live te
 - [x] Claude Code MCP entry updated (HUMAN, 2026-11-13)
 - [x] Extension tested in Chrome (HUMAN, 2026-11-13)
 - [x] No kb resources billing in the account except `kb-network`, `kb-data` and, until the user deletes it, the final RDS snapshot
-- [ ] Phase 27: README, SETUP, DEMO, RECOVERY, ALARMS, SECURITY_REVIEW match the verified state
-- [ ] Deck and rehearsal (HUMAN)
+- [x] Phase 27: README, DEMO, RECOVERY, ALARMS, SECURITY_REVIEW (status rows) match the verified state (2026-11-13; SETUP needed no change)
+- [ ] Deck and rehearsal (HUMAN, outside the repository)
 - Out of scope (user decision 2026-11-13): the planned phases 27 to 30 (preflight and S3 template upload, security hardening, a live SQLite session, an RDS failover and restore test)
 
 ## 12. Decisions

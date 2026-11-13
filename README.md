@@ -7,7 +7,9 @@ What the demo shows (`docs/DEMO.md`): searching the web UI and Claude Code over 
 - **12 MCP tools** for searching, adding, editing and uploading documents, over HTTP (`/mcp`) or stdio.
 - **Over HTTP the five read tools need no token; the seven write tools need a write token** (phase 24 decision, see Known limitations). The REST API, web UI and Chrome extension need a write token for writes too.
 - **One command deploys everything:** `infra/up.sh` builds the image and deploys the four stacks (`kb-network`, `kb-data`, `kb-db`, `kb-app`). `infra/up.sh save` backs up the database before the sandbox session ends.
-- **Students:** `docs/STUDENTS.md`. **Instructor runbook:** `docs/DEMO.md`. **Decisions and measurements:** `docs/PROGRESS.md`. **Security:** `docs/SECURITY_REVIEW.md`. **Setup detail for Linux and Windows:** `docs/SETUP.md`. **Backups and recovery:** `docs/RECOVERY.md`. **Alarms:** `docs/ALARMS.md`. **Remaining work and phases 26 onward:** `docs/FINAL_PROJECT_ROADMAP.md`.
+- **Students:** `docs/STUDENTS.md`. **Instructor runbook:** `docs/DEMO.md`. **Decisions and measurements:** `docs/PROGRESS.md`. **Security:** `docs/SECURITY_REVIEW.md`. **Setup detail for Linux and Windows:** `docs/SETUP.md`. **Backups and recovery:** `docs/RECOVERY.md`. **Alarms:** `docs/ALARMS.md`. **Final review and completion checklist:** `docs/FINAL_PROJECT_ROADMAP.md`.
+
+**Status (2026-11-13): complete.** Phases 1 to 27 are done. The `postgres` mode, including the phase 25 and 26 changes, was deployed and checked live on 2026-11-13, then torn down (see Results, "Live test"). The deployment runs on demand: `infra/up.sh` brings it up for a session and `kb-app` and `kb-db` are torn down afterwards, so there is no standing URL.
 
 ---
 
@@ -277,9 +279,9 @@ infra/class-capacity.sh up   # 4 instances for class (postgres mode); see docs/D
 infra/deploy.sh network|data|db|app [ImageTag]    # one stack by hand; infra/push-image.sh --build builds and uploads the image
 ```
 
-`infra/up.sh` is safe to run again at any time: unchanged stacks report "No changes to deploy". It prints the CloudFront domain at the end. The first deploy in a new account takes about 30 minutes (measured 2026-11-07 from an empty account: 26 minutes in all, of which `kb-db` about 15, the image build and upload about 3 and `kb-app` about 6; allow more for a slow network). After every deploy, run one warm-up search before anyone else does. In `postgres` mode `infra/up.sh save` first asks the app to export RDS to S3, then downloads the export.
+`infra/up.sh` is safe to run again at any time: unchanged stacks report "No changes to deploy". It prints the CloudFront domain at the end. The first deploy in a new account takes about 30 minutes (measured 2026-11-07 from an empty account: 26 minutes in all, of which `kb-db` about 15, the image build and upload about 3 and `kb-app` about 6; on 2026-11-13, 27 min 20 s; allow more for a slow network). After every deploy, run one warm-up search before anyone else does. In `postgres` mode `infra/up.sh save` first asks the app to export RDS to S3, then downloads the export.
 
-`infra/up.sh save` keeps the current `~/.config/kb-mcp/kb-latest.db.gz` in `saved/` first and replaces it only with an intact download (gzip, `integrity_check`, the `docs` and `chunks` tables) that has at least as many documents; `--force` accepts fewer documents, never a damaged file (phase 26, `docs/RECOVERY.md`).
+`infra/up.sh save` keeps the current `~/.config/kb-mcp/kb-latest.db.gz` in `saved/` first and replaces it only with an intact download (gzip, `integrity_check`, the `docs` and `chunks` tables) that has at least as many documents; `--force` accepts fewer documents, never a damaged file (phase 26, `docs/RECOVERY.md`). First live run 2026-11-13: it kept the 65-document copy in `saved/`, checked the download and replaced the laptop copy with 79 documents, 1089 chunks.
 
 Delete `kb-db` only with `infra/teardown-db.sh`, after `infra/up.sh save` and `infra/teardown-app.sh` (`kb-app` imports `kb-DbClientSg`). Since phase 25.5 `kb-db` has deletion protection, 7 days of automated backups and a final snapshot on delete, so a plain `delete-stack` fails; the script checks the laptop copy, turns protection off, and deletes. Backup layers, recovery objectives and every restore procedure are in `docs/RECOVERY.md`.
 
@@ -319,7 +321,7 @@ See `CLAUDE.md` for the local web server, PostgreSQL mode and the environment va
 
 ## Chrome extension
 
-`extension/` is a Manifest V3 capture extension (popup, settings, duplicate flow). **Status: written, not yet tested in Chrome.** The request shapes were checked against a local server in phase 14, but loading it unpacked, recording its ID, redeploying with `KB_EXTENSION_ORIGIN=chrome-extension://<id>` and capturing a real page is a human step still to do (phase 24, task 2). Until it is done, treat the extension as untested in the demo and the slides.
+`extension/` is a Manifest V3 capture extension (popup, settings, duplicate flow). **Status: tested in Chrome on 2026-11-13.** Loaded unpacked, deployed with `KB_EXTENSION_ORIGIN=chrome-extension://<id>` (set in `~/.config/kb-mcp/up.env`), pointed at the CloudFront URL with a write token; a captured page was stored and then found from Claude Code over MCP. After a new `kb-app` the CloudFront domain changes, so update the server URL in the extension settings.
 
 ---
 
@@ -334,7 +336,7 @@ See `CLAUDE.md` for the local web server, PostgreSQL mode and the environment va
 | Networking (VPC) | Custom VPC, public and private subnets in 2 AZs, route tables, internet gateway, one NAT gateway |
 | Connecting networks | S3 gateway endpoint so snapshots and the image never cross the NAT gateway; RDS reachable only through `kb-DbClientSg` |
 | Securing user and application access | Security group chaining (CloudFront prefix list, ALB, app, RDS), bearer write tokens kept in the private bucket (SSM is unreachable from the instance role), MCP write tools gated in the application |
-| Monitoring, elasticity, high availability | ALB health checks on `/livez` (liveness, no database; `/healthz` is the readiness and diagnostics endpoint); Auto Scaling group (min 2, max 4, CPU target 50 percent) replaces failed instances in either AZ; ALB and capacity alarms to SNS. Search-metric alarms exist but have no data (the sandbox role cannot publish metrics, `MetricsMode=off`) |
+| Monitoring, elasticity, high availability | ALB health checks on `/livez` (liveness, no database; `/healthz` is the readiness and diagnostics endpoint); Auto Scaling group (min 2, max 4, CPU target 50 percent) replaces failed instances in either AZ; ALB and capacity alarms to SNS. Search-metric alarms are created only when custom metrics can be published (`MetricsMode` api or emf); in the sandbox (`MetricsMode=off`) the alarms read AWS-published ALB, Auto Scaling, EC2 and RDS metrics; deployed and receiving data on 2026-11-13 (`docs/ALARMS.md`, Status) |
 | Automating your architecture | All resources in CloudFormation, four stacks, `infra/up.sh` from an empty account, `cfn-lint` and `validate-template` before every deploy |
 | Caching content | CloudFront for HTTPS and caching of `/static/*`; API, UI pages and MCP pass through uncached |
 | Decoupled and serverless architectures | Not built. The weekly EventBridge and Lambda report was a stretch goal; EventBridge is not on the sandbox list |
@@ -357,6 +359,21 @@ Every one is recorded with its reason in `docs/PROGRESS.md` ("Deviations"): no E
 
 ## Results
 
+### Live test (2026-11-13, `postgres` mode, the phase 25 and 26 code)
+
+| Check | Result |
+| --- | --- |
+| Deploy from an empty account (`infra/up.sh`, all four stacks, image `kb-mcp:f53c9cf`) | Exit 0 in 27 min 20 s; the laptop copy (65 docs, 790 chunks) imported into RDS |
+| `scripts/demo_check.sh` | All 14 lines PASS (semantic, both models ok, 2 healthy targets, demo searches `high`, out-of-corpus `low`, 12 tools, MCP write without a token refused) |
+| Load balancer health check | `/livez` (phase 25.3); 2 healthy targets, one in `us-east-1a` and one in `us-east-1b` (min 2, max 4) |
+| Alarms (phase 25.6) | 11 alarms; 10 OK from the start; `kb-no-healthy-host` in ALARM for 7 minutes while the stack was created, then OK; every alarm that shows missing data as a state was OK, so it received data (`docs/ALARMS.md`, Status). SNS subscription confirmed |
+| Write tokens (REST) | 401 without and with a wrong token, 201 with a write token; delete 401 without, 200 with |
+| Claude Code over MCP and the Chrome extension | Reads and writes from Claude Code; an extension capture stored and found from Claude Code |
+| `infra/up.sh save` (phase 26) | Old copy kept in `saved/`, download checked, laptop copy now 79 docs, 1089 chunks |
+| Teardown | Only `kb-network` and `kb-data` left; no instances, RDS, NAT gateway or Elastic IP. One final RDS snapshot kept by CloudFormation |
+
+Not tested live: RDS point-in-time restore, a forced RDS failover, scale-out under load (phases 23 and 24 are the evidence), the nightly export claim across instances, and a `sqlite` mode deployment of the phase 25 and 26 code. Details in `docs/PROGRESS.md` (phase log row "live test").
+
 ### Search quality (`python -m kb.cli eval tests/eval/questions.yaml`, 63 seeded documents, 784 chunks)
 
 | Backend | hit@1 | hit@5 | Out-of-corpus questions | Eval latency (median, max) | Source |
@@ -378,7 +395,7 @@ Through CloudFront on a `t3.medium` (semantic, one request at a time): 2.33 to 2
 | Phase 1, single instance replaced | not recorded (phase 12 never timed it; the service is down for the replacement boot) | PROGRESS Outputs |
 | Phase 2, instance marked unhealthy (2 instances, 2026-11-06) | Replacement healthy about 2 min 40 s later (marked 18:18:49 UTC, healthy by 18:21:31); 53 of 54 searches returned 200, 1 got no response | PROGRESS phase 22 |
 | Phase 2, rolling redeploy of both instances (2026-11-06) | 18:12:28 to 18:17:47 UTC (5 min 19 s); 90 of 91 searches returned 200, 1 got no response; the ALB recorded no 5xx | PROGRESS phase 22 |
-| Rehearsed live failover | TBD (HUMAN), filled in by `docs/DEMO.md` after the rehearsal | |
+| Rehearsed live failover | TBD (HUMAN), filled in by `docs/DEMO.md` after the rehearsal. The 2026-11-13 live test did not force a failover | |
 
 ### Load tests (Locust, 30 users, 25 minutes, from the laptop through CloudFront)
 
@@ -426,7 +443,7 @@ Hourly total while `kb-app` and `kb-db` exist (NAT, ALB without LCU charges, ins
 | 2 instances (default) | about $0.20 | about $4.83 | about $0.18 |
 | 4 instances (class) | about $0.29 | about $7.02 | about $0.27 |
 
-Idle (both app and database stacks deleted) only S3 bills: the image tarball, snapshots, backups and originals at this size cost well under a cent a day. Multi-AZ doubles the RDS instance and storage price (about $0.019 per hour extra); the other hourly costs are NAT $0.045, ALB $0.0225, each instance $0.0457 with its root volume. An ALB also bills LCU-hours for the traffic it carries.
+The stacks are brought up for a session and torn down afterwards, so these hourly rates apply only while a session runs. Idle (both app and database stacks deleted) only S3 bills: the image tarball, snapshots, backups and originals at this size cost well under a cent a day. Multi-AZ doubles the RDS instance and storage price (about $0.019 per hour extra); the other hourly costs are NAT $0.045, ALB $0.0225, each instance $0.0457 with its root volume. An ALB also bills LCU-hours for the traffic it carries. `infra/teardown-db.sh` leaves a final RDS snapshot (20 GB), which bills snapshot storage until it is deleted by hand.
 
 ---
 
@@ -443,6 +460,6 @@ The full list is `docs/SECURITY_REVIEW.md` ("Known limitations", 24 items). The 
 - **Occasional dropped connections** between the client and CloudFront were seen during deploys and failover drills (1 in 54 to 91 requests); the ALB counted no 5xx. Not explained (PROGRESS open issues).
 - **At 50 users (run3) almost every search is a keyword answer after a 5 s wait.** 4 instances serve about 0.7 semantic searches per second each; keyword search and RDS were not the limit (RDS at most 18 connections and 17 percent CPU).
 - **One NAT gateway, in AZ a.** If AZ a fails, instances in AZ b keep serving searches, but `ingest_url` fails and no replacement instance can boot until AZ a is back (`docs/SECURITY_REVIEW.md`, limitation 24). A second NAT gateway costs about 33 USD a month.
-- **Chrome extension: written, not yet tested in Chrome.**
+- **Not tested live:** RDS point-in-time restore (`infra/restore-test-db.sh` is stub-tested and its check runs against a local PostgreSQL), a forced RDS failover, the nightly export claim across instances (tested locally with 4 claimants), and a `sqlite` mode deployment since phase 25 (phases 25 and 26 are tested locally in that mode).
 
 Scale-out path beyond this project: a custom domain with ACM on the ALB, MCP OAuth 2.1, a shared rate-limit counter (database, or CloudFront and WAF rules), a larger or faster model host, baking the models into the image so a new instance becomes healthy faster.
