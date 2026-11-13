@@ -1,4 +1,6 @@
-# Phase 24: Final README, extension test and submission
+# Phase 24: Classroom readiness, README and extension test
+
+First planned as the final phase ("Final README, extension test and submission"); phases 25 to 27 followed, and the final wrap-up is phase 27 (`27-final-wrap-up.md`).
 
 **Days:** Wed Nov 11 to Thu Nov 12 (due Fri Nov 13) · **Depends on:** 23 · **Where:** local + AWS · **PLAN.md sections:** Course alignment; Demo corpus and demo script
 

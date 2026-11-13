@@ -179,7 +179,7 @@ Optional, free, no new deployment: **CloudTrail event history** (allowed in the 
 | P5 | `docs/RECOVERY.md`, `docs/ALARMS.md` status tables after phases 29 and 30 | done in phase 27 (from the 2026-11-13 live test) | P1 |
 | P6 | One consolidated AWS Academy limitations table (today spread over PROGRESS, SECURITY_REVIEW, README) | not planned | P2 |
 | P7 | `docs/PROGRESS.md`: record finding 3 (earlier `kb-app` in this account) | done (open issue closed with a note, phase 27) | P3 |
-| P8 | Phase 24 open acceptance items: extension tested in Chrome, final deck, CI green, GitHub matches the laptop (`docs/phases/24-final-wrap.md`) | extension, CI and GitHub done 2026-11-13; final deck HUMAN | P1 |
+| P8 | Phase 24 open acceptance items: extension tested in Chrome, final deck, CI green, GitHub matches the laptop (`docs/phases/24-classroom-readiness.md`) | extension, CI and GitHub done 2026-11-13; final deck HUMAN | P1 |
 | P9 | Presentation: architecture slide, one slide per service with its role, demo script, failure and monitoring demo, security demo, cost and cleanup slide | HUMAN (deck); numbers listed in `docs/phases/27-final-wrap-up.md`, "Deck numbers" | P1 |
 
 ### 6.6 Failure scenarios

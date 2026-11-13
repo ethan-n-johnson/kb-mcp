@@ -40,7 +40,7 @@ Not tested live (say so wherever they are mentioned): RDS point-in-time restore 
 2. `README.md`: the extension status (tested 2026-11-13); phases 25 and 26 in the status or results section as verified live on 2026-11-13 (with the list of what was not tested); the save behavior; the cost notes stay as they are unless they contradict the live run.
 3. `docs/DEMO.md`, `docs/RECOVERY.md`, `docs/ALARMS.md`: status tables updated from "not deployed" to the live results where the table above covers them; the `kb-no-healthy-host` startup alarm and its 7 minute clear noted in `docs/ALARMS.md`.
 4. `docs/FINAL_PROJECT_ROADMAP.md`: marked complete; section 11 checklist ticked or marked out of scope.
-5. `docs/phases/24-final-wrap.md`: tick the acceptance items the live test settled (extension tested, demo check, CI green, GitHub matches); leave the deck and rehearsal to the user.
+5. `docs/phases/24-classroom-readiness.md`: tick the acceptance items the live test settled (extension tested, demo check, CI green, GitHub matches); leave the deck and rehearsal to the user.
 6. A short list for the user's deck: the verified numbers and where each is recorded (no slides are written in this phase).
 
 ## Out of scope
