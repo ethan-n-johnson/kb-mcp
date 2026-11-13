@@ -37,13 +37,13 @@ Finish what phase 17 left open, close the small loose ends from phase 1, test th
 
 ## Acceptance
 
-- [ ] `KB_METRICS_MODE=off` deployed; the 30 s warning is gone from the container log.
-- [ ] Extension tested with screenshots, or marked untested everywhere it appears.
-- [ ] README covers both phases with diagrams, results and dated cost notes.
-- [ ] `scripts/demo_check.sh "$CF"` prints all PASS against the live stack.
-- [ ] `SearchRate` default is `120/minute` in the stack, config, tests, CLAUDE.md and SECURITY_REVIEW.md.
-- [ ] Classroom load test (run3, 50 users) recorded in PROGRESS.md: failures under 1%, no instance killed by the health check, semantic and keyword share, RDS connections and CPU.
-- [ ] Pre-class scaling method written in `docs/DEMO.md` and tried once (4 healthy targets before load, back to 2 after).
-- [ ] MCP write decision recorded; student instructions published.
-- [ ] Repo on GitHub matches the laptop; CI green; final deck submitted.
-- [ ] Phase log updated; commit `phase 24: final README and submission`.
+- [x] `KB_METRICS_MODE=off` deployed (2026-11-07 and 2026-11-13). The container log is not readable from the laptop (no CloudWatch Logs or SSM), so the missing warning is shown by the code and its test, not by the log.
+- [x] Extension tested in Chrome on 2026-11-13 (capture stored and found from Claude Code); screenshots for the slides are HUMAN.
+- [x] README covers both phases with diagrams, results and dated cost notes.
+- [x] `scripts/demo_check.sh "$CF"` prints all PASS against the live stack (2026-11-07 and 2026-11-13).
+- [x] `SearchRate` default is `120/minute` in the stack, config, tests, CLAUDE.md and SECURITY_REVIEW.md.
+- [x] Classroom load test (run3, 50 users) recorded in PROGRESS.md: failures under 1%, no instance killed by the health check, semantic and keyword share, RDS connections and CPU.
+- [x] Pre-class scaling method written in `docs/DEMO.md` and tried once (4 healthy targets before load, back to 2 after).
+- [x] MCP write decision recorded; student instructions published.
+- [ ] Repo on GitHub matches the laptop; CI green; final deck submitted. (GitHub and CI done 2026-11-13: `master` at `f53c9cf` green with a clean tree before the live test; the deck is HUMAN.)
+- [x] Phase log updated; committed as `c0a75a8` "phase 24: classroom readiness, README and run3 (HUMAN steps pending)" (PR #7).
