@@ -11,6 +11,14 @@
 #                        it first asks the app to write a fresh export
 #                        (POST /api/admin/export, token from the write-tokens file),
 #                        because only the app updates the snapshot from RDS.
+#                        The download replaces kb-latest.db.gz only when it is an
+#                        intact knowledge base (gzip, integrity_check, docs and
+#                        chunks tables; infra/scripts/check_sqlite_copy.py) with at
+#                        least as many documents as the current laptop copy. The
+#                        current copy is kept in saved/ before anything else.
+#   infra/up.sh save --force
+#                        the same, but accept fewer documents (intended deletions).
+#                        A damaged download is never accepted.
 #
 # Steps of infra/up.sh:
 #   1. Check the AWS credentials and the instance profile (myS3Role).
@@ -42,7 +50,9 @@
 #                    on the first run if missing, mode 600). Lose it and the next
 #                    kb-db deploy fails; delete kb-db first, then the file.
 #   kb-latest.db.gz  the snapshot saved by "infra/up.sh save"
-#   saved/           dated copies of each save (kb-<UTC time>.db.gz), the newest 14
+#   saved/           dated copies (kb-<UTC time>.db.gz for each save, and
+#                    kb-<UTC time>-before.db.gz for the copy a save started from),
+#                    the newest 14
 set -euo pipefail
 
 REGION="us-east-1"
@@ -65,7 +75,7 @@ die() {
 }
 
 usage() {
-  echo "usage: infra/up.sh [save]" >&2
+  echo "usage: infra/up.sh [save [--force]]" >&2
   exit 2
 }
 
@@ -142,28 +152,74 @@ export_postgres() {
   step "export done: $response"
 }
 
+# check_copy FILE: print the document count of an intact gzipped knowledge base, or
+# fail with the reason on stderr (standard library only, no virtualenv needed).
+check_copy() {
+  python3 -I "$ROOT/infra/scripts/check_sqlite_copy.py" "$1"
+}
+
+# keep_current STAMP: copy the current laptop copy into saved/ before a save touches
+# anything, unless an identical copy is already there.
+keep_current() {
+  local f
+  [ -f "$SNAPSHOT_FILE" ] || return 0
+  mkdir -p "$SAVED_DIR"
+  for f in "$SAVED_DIR"/kb-*.db.gz; do
+    [ -f "$f" ] && cmp -s "$f" "$SNAPSHOT_FILE" && return 0
+  done
+  cp -p "$SNAPSHOT_FILE" "$SAVED_DIR/kb-$1-before.db.gz"
+  step "kept the current laptop copy as $SAVED_DIR/kb-$1-before.db.gz"
+}
+
 save_snapshot() {
+  local force=$1 stamp old_docs="" new_docs tmp="$SNAPSHOT_FILE.tmp"
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  mkdir -p "$CONFIG_DIR"
+  keep_current "$stamp"
+  if [ -f "$SNAPSHOT_FILE" ]; then
+    old_docs="$(check_copy "$SNAPSHOT_FILE")" \
+      || step "the current laptop copy is damaged (above); any intact download replaces it"
+  fi
   check_credentials
   find_bucket
   export_postgres
   object_exists "$SNAPSHOT_KEY" || die "s3://$BUCKET/$SNAPSHOT_KEY does not exist; nothing to save"
-  mkdir -p "$CONFIG_DIR"
-  aws s3 cp "s3://$BUCKET/$SNAPSHOT_KEY" "$SNAPSHOT_FILE.tmp" --region "$REGION" > /dev/null
-  mv "$SNAPSHOT_FILE.tmp" "$SNAPSHOT_FILE"
-  # Keep dated copies too, so a bad save (an export taken after a mistake) never
-  # replaces the only good one. The newest KEEP_SAVED stay (docs/RECOVERY.md).
+  rm -f "$tmp"
+  if ! aws s3 cp "s3://$BUCKET/$SNAPSHOT_KEY" "$tmp" --region "$REGION" > /dev/null; then
+    rm -f "$tmp"
+    die "the download failed; $SNAPSHOT_FILE is unchanged"
+  fi
+  if ! new_docs="$(check_copy "$tmp")"; then
+    rm -f "$tmp"
+    die "s3://$BUCKET/$SNAPSHOT_KEY failed its check (above); $SNAPSHOT_FILE is unchanged"
+  fi
+  if [ -n "$old_docs" ] && [ "$new_docs" -lt "$old_docs" ]; then
+    if [ "$force" != 1 ]; then
+      rm -f "$tmp"
+      die "s3://$BUCKET/$SNAPSHOT_KEY has $new_docs documents, fewer than the $old_docs in $SNAPSHOT_FILE; kept the laptop copy. If the deletions were intended, run: infra/up.sh save --force"
+    fi
+    step "--force: accepting $new_docs documents (the laptop copy had $old_docs)"
+  fi
+  mv "$tmp" "$SNAPSHOT_FILE"
+  # Dated copies, so a bad save (an export taken after a mistake) never replaces the
+  # only good one. The newest KEEP_SAVED stay (docs/RECOVERY.md).
   mkdir -p "$SAVED_DIR"
-  cp "$SNAPSHOT_FILE" "$SAVED_DIR/kb-$(date -u +%Y%m%dT%H%M%SZ).db.gz"
+  cp "$SNAPSHOT_FILE" "$SAVED_DIR/kb-$stamp.db.gz"
   find "$SAVED_DIR" -maxdepth 1 -name 'kb-*.db.gz' -type f | sort -r | tail -n "+$((KEEP_SAVED + 1))" \
     | while IFS= read -r old; do rm -f -- "$old"; done
-  step "saved $SNAPSHOT_FILE (and a dated copy in $SAVED_DIR); the next infra/up.sh uploads it if the bucket has no snapshot"
+  step "saved $SNAPSHOT_FILE ($new_docs documents) and a dated copy in $SAVED_DIR; the next infra/up.sh uploads it if the bucket has no snapshot"
 }
 
-if [ $# -gt 1 ]; then
+if [ $# -gt 2 ]; then
   usage
-elif [ $# -eq 1 ]; then
+elif [ $# -ge 1 ]; then
   [ "$1" = "save" ] || usage
-  save_snapshot
+  if [ $# -eq 2 ]; then
+    [ "$2" = "--force" ] || usage
+    save_snapshot 1
+  else
+    save_snapshot 0
+  fi
   exit 0
 fi
 

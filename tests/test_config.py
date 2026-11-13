@@ -235,3 +235,55 @@ def test_the_env_url_wins_and_s3_is_not_called() -> None:
 def test_s3_source_without_a_bucket_is_refused() -> None:
     with pytest.raises(ValueError, match="KB_BUCKET"):
         config.Settings.from_env({"KB_DATABASE_URL_SOURCE": "s3"})
+
+
+# --- a missing database URL stops startup (phase 26, T8) ------------------------------------
+
+
+@mock_aws
+def test_a_missing_database_url_object_names_the_key_and_is_not_cached() -> None:
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="kb-x")
+    env = {"KB_DATABASE_URL_SOURCE": "s3", "KB_BUCKET": "kb-x"}
+    with pytest.raises(RuntimeError, match=r"s3://kb-x/config/database-url \(NoSuchKey\).*infra/up.sh"):
+        config.Settings.from_env(env)
+    # Once up.sh has written it, the next start reads it (the failure was not cached).
+    s3.put_object(Bucket="kb-x", Key="config/database-url", Body=URL.encode())
+    assert config.Settings.from_env(env).database_url == URL
+
+
+@mock_aws
+def test_a_missing_bucket_is_a_clear_error_too() -> None:
+    env = {"KB_DATABASE_URL_SOURCE": "s3", "KB_BUCKET": "kb-gone"}
+    with pytest.raises(RuntimeError, match=r"s3://kb-gone/config/database-url \(NoSuchBucket\)"):
+        config.Settings.from_env(env)
+
+
+@mock_aws
+def test_an_empty_database_url_object_is_refused_not_read_as_sqlite() -> None:
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="kb-x")
+    s3.put_object(Bucket="kb-x", Key="config/database-url", Body=b"\n")
+    with pytest.raises(ValueError, match="must start with postgresql://"):
+        config.Settings.from_env({"KB_DATABASE_URL_SOURCE": "s3", "KB_BUCKET": "kb-x"})
+
+
+@mock_aws
+def test_the_app_does_not_start_and_creates_no_database_without_the_url(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from kb.main import create_app
+
+    boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="kb-x")
+    db_file = tmp_path / "kb.db"
+    for name, value in {
+        "KB_DATABASE_URL_SOURCE": "s3", "KB_BUCKET": "kb-x", "KB_DB": str(db_file),
+        "KB_MODELS": "off", "KB_SNAPSHOTS": "off", "KB_WRITE_TOKENS": "dev:devtoken",
+    }.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(RuntimeError, match="cannot read the database URL"):
+        with TestClient(create_app()):
+            pass
+    assert not db_file.exists()

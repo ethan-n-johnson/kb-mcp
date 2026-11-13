@@ -173,6 +173,16 @@ def test_healthz_answers_in_under_200_ms_while_every_worker_thread_is_busy(clien
     assert elapsed < 0.2
 
 
+def test_livez_answers_in_under_200_ms_while_every_worker_thread_is_busy(client: TestClient) -> None:
+    """Phase 26 (T4): the ALB check must not queue behind searches for a worker thread."""
+    with thread_pool_held(client):
+        started = time.perf_counter()
+        resp = client.get("/livez")
+        elapsed = time.perf_counter() - started
+    assert resp.status_code == 200 and resp.json() == {"status": "alive"}
+    assert elapsed < 0.2
+
+
 @pytest.fixture
 def monitor_clock() -> Clock:
     return Clock(time.monotonic())

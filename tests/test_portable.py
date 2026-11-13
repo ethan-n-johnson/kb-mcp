@@ -208,6 +208,51 @@ def test_export_to_s3_writes_a_restorable_snapshot(pg_store: Store, tmp_path: Pa
 
 @pg
 @mock_aws
+def test_switching_back_to_sqlite_restores_the_postgres_data_with_its_vectors(
+    pg_store: Store, tmp_path: Path, open_app: OpenApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 26 (T7): after an RDS session, the next SQLite deploy boots from the export.
+
+    PostgreSQL holds the corpus plus a write made in PostgreSQL mode; `export_to`
+    writes the snapshot key (what `up.sh save` and the nightly cron do); the
+    SQLite boot path (`kb.cli restore --latest --force`, here `restore_backup`)
+    restores it; the app then starts in SQLite mode with every vector in its index
+    and answers a semantic search, with no backfill needed.
+    """
+    portable.import_sqlite(pg_store, build_sqlite(tmp_path / "source.db"))
+    doc_id = pg_store.fetchone("SELECT min(id) FROM docs")[0]
+    service.verify(pg_store, doc_id, "bob", note="checked on rds")  # written in PostgreSQL mode
+    pg_chunks = [(r[0], bytes(r[1])) for r in pg_store.fetchall("SELECT id, embedding FROM chunks ORDER BY id")]
+    assert pg_chunks and all(len(v) == 384 * 4 for _, v in pg_chunks)
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="kb-x")
+    portable.export_to(pg_store, "s3://kb-x/snapshots/kb-latest.db.gz")
+
+    target = tmp_path / "data" / "kb.db"
+    target.parent.mkdir()
+    restored = backup.restore_backup("kb-x", target, latest=True, force=True, client=s3)
+    assert restored.docs == len(DOCS)
+    conn = sqlite3.connect(str(target))
+    try:
+        sqlite_chunks = [(r[0], bytes(r[1])) for r in conn.execute("SELECT id, embedding FROM chunks ORDER BY id")]
+        verified = conn.execute("SELECT verified_by FROM docs WHERE id = ?", (doc_id,)).fetchone()[0]
+    finally:
+        conn.close()
+    assert sqlite_chunks == pg_chunks  # same ids, same float32 bytes
+    assert verified == "bob"
+
+    monkeypatch.delenv("KB_DATABASE_URL")
+    with open_app(KB_DB=str(target)) as client:
+        assert client.app.state.settings.dialect == "sqlite"
+        health = client.get("/healthz").json()
+        assert health["chunks"] == health["index_size"] == len(pg_chunks)
+        result = client.get("/api/search", params={"q": "load balancer"}).json()
+        assert result["mode"] == "semantic" and result["results"]
+
+
+@pg
+@mock_aws
 def test_import_from_s3_key_and_address(pg_store: Store, tmp_path: Path) -> None:
     source = build_sqlite(tmp_path / "source.db")
     s3 = boto3.client("s3", region_name="us-east-1")
@@ -394,6 +439,43 @@ def test_only_the_first_instance_claims_the_scheduled_export(pg_store: Store) ->
         assert portable.claim_scheduled_export(other, 3600, now=t0 + timedelta(days=1)) == "2026-11-09T07:15:00Z"
     finally:
         other.close()
+
+
+@pg
+def test_exactly_one_of_many_instances_claiming_at_once_wins(pg_store: Store) -> None:
+    """Phase 26 (T2): instances whose cron fires in the same instant; the advisory write lock picks one."""
+    import threading
+    from datetime import datetime, timezone
+
+    from kb.config import Settings
+    from kb.store import open_store
+
+    instances = 4  # the group maximum; with pg_store that is the pool's 5 connections
+    stores = [open_store(Settings.from_env()) for _ in range(instances)]
+    t0 = datetime(2026, 11, 13, 7, 15, tzinfo=timezone.utc)
+    try:
+        for _ in range(10):
+            pg_store.execute("DELETE FROM settings WHERE key = ?", (portable.SCHEDULED_EXPORT_KEY,))
+            barrier = threading.Barrier(instances)
+            results: list[object] = [None] * instances
+
+            def claim(i: int) -> None:
+                barrier.wait()
+                try:
+                    results[i] = portable.claim_scheduled_export(stores[i], 3600, now=t0)
+                except Exception as exc:  # noqa: BLE001  (a failure must fail the test, not hang it)
+                    results[i] = exc
+
+            threads = [threading.Thread(target=claim, args=(i,)) for i in range(instances)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+            assert not any(isinstance(r, Exception) for r in results), results
+            assert results.count("") == 1 and results.count(None) == instances - 1
+    finally:
+        for store in stores:
+            store.close()
 
 
 @pg

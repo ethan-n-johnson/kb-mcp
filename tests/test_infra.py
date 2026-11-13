@@ -1203,6 +1203,8 @@ def up_env(tmp_path: Path) -> dict[str, Path]:
         d.mkdir(parents=True)
     log = tmp_path / "calls.log"
     shutil.copy(UP, root / "infra" / "up.sh")
+    (root / "infra" / "scripts").mkdir()
+    shutil.copy(INFRA / "scripts" / "check_sqlite_copy.py", root / "infra" / "scripts")
     make_stub(root / "infra", "deploy.sh", DEPLOY_UP_STUB.format(log=log, state=state))
     make_stub(root / "infra", "push-image.sh", PUSH_UP_STUB.format(log=log, state=state))
     make_stub(bin_dir, "aws", AWS_UP_STUB.format(log=log, state=state))
@@ -1213,6 +1215,21 @@ def up_env(tmp_path: Path) -> dict[str, Path]:
     subprocess.run([*git, "commit", "-qm", "init"], check=True)
     (config / "up.env").write_text("KB_ALERT_EMAIL=me@example.com\n", encoding="utf-8")
     return {"root": root, "state": state, "bin": bin_dir, "config": config, "log": log}
+
+
+def kb_copy(docs: int, chunks_per_doc: int = 2) -> bytes:
+    """A gzipped SQLite knowledge base with `docs` documents, as `up.sh save` downloads it."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT)")
+    conn.execute("CREATE TABLE chunks (id INTEGER PRIMARY KEY, doc_id INTEGER, text TEXT)")
+    for d in range(docs):
+        conn.execute("INSERT INTO docs (title) VALUES (?)", (f"doc {d}",))
+        for c in range(chunks_per_doc):
+            conn.execute("INSERT INTO chunks (doc_id, text) VALUES (?, ?)", (d + 1, f"chunk {c}"))
+    conn.commit()
+    raw = conn.serialize()
+    conn.close()
+    return gzip.compress(raw)
 
 
 def run_up(env: dict[str, Path], *args: str) -> subprocess.CompletedProcess[str]:
@@ -1342,19 +1359,22 @@ def test_up_lists_the_profiles_when_the_instance_profile_is_missing(up_env: dict
 
 def test_up_save_downloads_the_snapshot(up_env: dict[str, Path]) -> None:
     (up_env["state"] / "stack-kb-data").write_text("CREATE_COMPLETE\n", encoding="utf-8")
-    (up_env["state"] / "obj-snapshots_kb-latest.db.gz").write_bytes(b"latest db")
+    latest = kb_copy(3)
+    (up_env["state"] / "obj-snapshots_kb-latest.db.gz").write_bytes(latest)
     result = run_up(up_env, "save")
     assert result.returncode == 0, result.stderr
-    assert (up_env["config"] / "kb-latest.db.gz").read_bytes() == b"latest db"
+    assert (up_env["config"] / "kb-latest.db.gz").read_bytes() == latest
+    assert "(3 documents)" in result.stderr
     assert not [c for c in up_calls(up_env) if c.startswith(("deploy.sh", "push-image.sh"))]
     (dated,) = (up_env["config"] / "saved").glob("kb-*.db.gz")
-    assert re.fullmatch(r"kb-\d{8}T\d{6}Z\.db\.gz", dated.name) and dated.read_bytes() == b"latest db"
+    assert re.fullmatch(r"kb-\d{8}T\d{6}Z\.db\.gz", dated.name) and dated.read_bytes() == latest
 
 
 def test_up_save_keeps_the_newest_fourteen_dated_copies(up_env: dict[str, Path]) -> None:
     """Phase 25.5: a bad save never replaces the only good laptop copy."""
     (up_env["state"] / "stack-kb-data").write_text("CREATE_COMPLETE\n", encoding="utf-8")
-    (up_env["state"] / "obj-snapshots_kb-latest.db.gz").write_bytes(b"latest db")
+    latest = kb_copy(1)
+    (up_env["state"] / "obj-snapshots_kb-latest.db.gz").write_bytes(latest)
     saved = up_env["config"] / "saved"
     saved.mkdir()
     for day in range(1, 17):
@@ -1364,7 +1384,7 @@ def test_up_save_keeps_the_newest_fourteen_dated_copies(up_env: dict[str, Path])
     # The new copy plus the 13 newest old ones (days 4 to 16); days 1 to 3 are gone.
     assert len(names) == 14
     assert names[:13] == [f"kb-202610{day:02d}T000000Z.db.gz" for day in range(4, 17)]
-    assert (saved / names[13]).read_bytes() == b"latest db"
+    assert (saved / names[13]).read_bytes() == latest
 
 
 # A stub curl: records its arguments and what arrived on stdin (the config that carries the token),
@@ -1377,13 +1397,16 @@ echo '{{"status":"exported","key":"snapshots/kb-latest.db.gz","docs":3,"chunks":
 """
 
 
+EXPORTED = kb_copy(3)
+
+
 def postgres_app(env: dict[str, Path], tokens: str | None = "temp:secretone,demo:secrettwo") -> None:
     """Make the stub account look like kb-app runs in PostgreSQL mode, with a saved tokens file."""
     state = env["state"]
     (state / "stack-kb-data").write_text("CREATE_COMPLETE\n", encoding="utf-8")
     (state / "stack-kb-app").write_text("CREATE_COMPLETE\n", encoding="utf-8")
     (state / "database-mode").write_text("postgres\n", encoding="utf-8")
-    (state / "obj-snapshots_kb-latest.db.gz").write_bytes(b"exported db")
+    (state / "obj-snapshots_kb-latest.db.gz").write_bytes(EXPORTED)
     make_stub(env["bin"], "curl", CURL_UP_STUB.format(log=env["log"], state=state))
     if tokens is not None:
         (env["config"] / "write-tokens").write_text(tokens + "\n", encoding="utf-8")
@@ -1399,7 +1422,7 @@ def test_up_save_in_postgres_mode_exports_first_then_downloads(up_env: dict[str,
     assert (up_env["state"] / "curl-stdin").read_text(encoding="utf-8") == 'header = "Authorization: Bearer secretone"\n'
     assert "secretone" not in curl + result.stdout + result.stderr
     assert "export done" in result.stderr and '"docs":3' in result.stderr
-    assert (up_env["config"] / "kb-latest.db.gz").read_bytes() == b"exported db"
+    assert (up_env["config"] / "kb-latest.db.gz").read_bytes() == EXPORTED
     calls_list = up_calls(up_env)
     export_at = next(i for i, c in enumerate(calls_list) if c.startswith("curl "))
     download_at = next(i for i, c in enumerate(calls_list) if c.startswith("aws s3 cp"))
@@ -2112,3 +2135,251 @@ def test_restore_test_never_names_the_source_in_a_write_call() -> None:
         if "SOURCE_ID" in line and re.search(r"\b(delete|modify|stop|reboot)-db-instance\b", line):
             raise AssertionError(line)
     assert '--source-db-instance-identifier "$SOURCE_ID"' in text
+
+
+# --- infra/up.sh save checks the download (phase 26, roadmap finding 1) ---------------------
+
+
+@pytest.fixture
+def save_env(up_env: dict[str, Path]) -> dict[str, Path]:
+    """A bucket with a snapshot and a laptop copy with 5 documents."""
+    (up_env["state"] / "stack-kb-data").write_text("CREATE_COMPLETE\n", encoding="utf-8")
+    (up_env["config"] / "kb-latest.db.gz").write_bytes(LAPTOP)
+    return up_env
+
+
+LAPTOP = kb_copy(5)
+
+
+def bucket_snapshot(env: dict[str, Path], data: bytes) -> None:
+    (env["state"] / "obj-snapshots_kb-latest.db.gz").write_bytes(data)
+
+
+def assert_laptop_copy_kept(env: dict[str, Path]) -> None:
+    """The laptop copy is byte-identical, a copy of it is in saved/, and no temporary file is left."""
+    config = env["config"]
+    assert (config / "kb-latest.db.gz").read_bytes() == LAPTOP
+    before = list((config / "saved").glob("kb-*-before.db.gz"))
+    assert len(before) == 1 and before[0].read_bytes() == LAPTOP
+    assert not (config / "kb-latest.db.gz.tmp").exists()
+
+
+def corrupt_sqlite() -> bytes:
+    raw = bytearray(gzip.decompress(kb_copy(8)))
+    raw[4096:8192] = b"\xff" * 4096  # overwrite page 2 (the tables)
+    return gzip.compress(bytes(raw))
+
+
+def no_docs_table() -> bytes:
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE other (x)")
+    raw = conn.serialize()
+    conn.close()
+    return gzip.compress(raw)
+
+
+@pytest.mark.parametrize(
+    ("download", "reason"),
+    [
+        (b"<Error><Code>AccessDenied</Code></Error>", "not a readable gzip file"),
+        (kb_copy(9)[:200], "not a readable gzip file"),
+        (gzip.compress(b"not a database at all, just some text" * 200), "not a readable SQLite database"),
+        (corrupt_sqlite(), "SQLite"),
+        (no_docs_table(), "no chunks, docs table"),
+    ],
+    ids=["not-gzip", "truncated-gzip", "not-sqlite", "corrupt-pages", "no-docs-table"],
+)
+def test_up_save_refuses_a_damaged_download_and_keeps_the_laptop_copy(
+    save_env: dict[str, Path], download: bytes, reason: str
+) -> None:
+    bucket_snapshot(save_env, download)
+    result = run_up(save_env, "save")
+    assert result.returncode == 1
+    assert reason in result.stderr and "failed its check" in result.stderr and "is unchanged" in result.stderr
+    assert_laptop_copy_kept(save_env)
+    # --force never accepts a damaged copy.
+    result = run_up(save_env, "save", "--force")
+    assert result.returncode == 1 and "failed its check" in result.stderr
+    assert_laptop_copy_kept(save_env)
+
+
+def test_up_save_refuses_fewer_documents_and_keeps_the_laptop_copy(save_env: dict[str, Path]) -> None:
+    bucket_snapshot(save_env, kb_copy(0))  # a deploy that started empty, then exported
+    result = run_up(save_env, "save")
+    assert result.returncode == 1
+    assert "has 0 documents, fewer than the 5" in result.stderr and "save --force" in result.stderr
+    assert_laptop_copy_kept(save_env)
+    assert not list((save_env["config"] / "saved").glob("kb-*Z.db.gz"))  # no dated copy of the bad one
+
+
+def test_up_save_force_accepts_an_intact_smaller_copy(save_env: dict[str, Path]) -> None:
+    smaller = kb_copy(4)
+    bucket_snapshot(save_env, smaller)
+    result = run_up(save_env, "save", "--force")
+    assert result.returncode == 0, result.stderr
+    assert "accepting 4 documents (the laptop copy had 5)" in result.stderr
+    config = save_env["config"]
+    assert (config / "kb-latest.db.gz").read_bytes() == smaller
+    # The 5-document copy it replaced is still on the laptop.
+    (before,) = (config / "saved").glob("kb-*-before.db.gz")
+    assert before.read_bytes() == LAPTOP
+
+
+def test_up_save_replaces_the_copy_with_an_intact_larger_one(save_env: dict[str, Path]) -> None:
+    larger = kb_copy(6)
+    bucket_snapshot(save_env, larger)
+    result = run_up(save_env, "save")
+    assert result.returncode == 0, result.stderr
+    config = save_env["config"]
+    assert (config / "kb-latest.db.gz").read_bytes() == larger
+    names = sorted(p.name for p in (config / "saved").glob("kb-*.db.gz"))
+    assert len(names) == 2 and names[0].endswith("Z-before.db.gz")
+    assert (config / "saved" / names[0]).read_bytes() == LAPTOP
+    assert (config / "saved" / names[1]).read_bytes() == larger
+
+
+def test_up_save_keeps_the_laptop_copy_only_once(save_env: dict[str, Path]) -> None:
+    """Repeated refused saves do not fill saved/ with copies of the same file."""
+    bucket_snapshot(save_env, kb_copy(0))
+    for _ in range(3):
+        assert run_up(save_env, "save").returncode == 1
+    assert len(list((save_env["config"] / "saved").glob("kb-*.db.gz"))) == 1
+
+
+def test_up_save_keeps_the_laptop_copy_before_checking_credentials(save_env: dict[str, Path]) -> None:
+    (save_env["state"] / "no-creds").touch()
+    result = run_up(save_env, "save")
+    assert result.returncode == 1 and "Start Lab" in result.stderr
+    assert_laptop_copy_kept(save_env)
+
+
+def test_up_save_replaces_a_damaged_laptop_copy_with_an_intact_download(save_env: dict[str, Path]) -> None:
+    config = save_env["config"]
+    (config / "kb-latest.db.gz").write_bytes(b"damaged")
+    good = kb_copy(2)
+    bucket_snapshot(save_env, good)
+    result = run_up(save_env, "save")
+    assert result.returncode == 0, result.stderr
+    assert "current laptop copy is damaged" in result.stderr
+    assert (config / "kb-latest.db.gz").read_bytes() == good
+    (before,) = (config / "saved").glob("kb-*-before.db.gz")
+    assert before.read_bytes() == b"damaged"
+
+
+def test_up_save_refuses_a_failed_download(save_env: dict[str, Path]) -> None:
+    bucket_snapshot(save_env, kb_copy(6))
+    stub = save_env["bin"] / "aws"
+    stub.write_text(stub.read_text(encoding="utf-8").replace(
+        '"s3 cp")', '"s3 cp") echo partial > "$4"; exit 1 ;;\n  "unused")', 1), encoding="utf-8")
+    result = run_up(save_env, "save")
+    assert result.returncode == 1 and "the download failed" in result.stderr
+    assert_laptop_copy_kept(save_env)
+
+
+def test_check_sqlite_copy_prints_the_document_count(tmp_path: Path) -> None:
+    good = tmp_path / "kb.db.gz"
+    good.write_bytes(kb_copy(7, chunks_per_doc=3))
+    result = subprocess.run(
+        ["python3", "-I", str(INFRA / "scripts" / "check_sqlite_copy.py"), str(good)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0 and result.stdout == "7\n"
+    assert "integrity ok, 7 docs, 21 chunks" in result.stderr
+
+
+# --- alarm and dashboard metrics exist in AWS (phase 26, T5) -------------------------------
+
+# Metric names and the dimension sets AWS publishes them with, from the CloudWatch metrics
+# pages of each service (Elastic Load Balancing "CloudWatch metrics for your Application
+# Load Balancer", Amazon EC2 Auto Scaling "Monitor CloudWatch metrics for your Auto Scaling
+# groups", Amazon EC2 "instance metrics" (aggregated by group), Amazon RDS "instance-level
+# metrics"). A misspelled name or a dimension set AWS never publishes gives an alarm that
+# sits in INSUFFICIENT_DATA (or OK with notBreaching) forever, which no other test catches.
+_LB, _TG, _AZ = "LoadBalancer", "TargetGroup", "AvailabilityZone"
+_ALB_ANY = {frozenset({_LB}), frozenset({_LB, _AZ}), frozenset({_LB, _TG}), frozenset({_LB, _TG, _AZ})}
+_ALB_TG = {frozenset({_LB, _TG}), frozenset({_LB, _TG, _AZ})}
+_ALB_LB = {frozenset({_LB}), frozenset({_LB, _AZ})}
+_ASG = {frozenset({"AutoScalingGroupName"})}
+_RDS = {frozenset(), frozenset({"DBInstanceIdentifier"}), frozenset({"DBClusterIdentifier"}),
+        frozenset({"DatabaseClass"}), frozenset({"EngineName"})}
+AWS_METRICS: dict[tuple[str, str], set[frozenset[str]]] = {
+    ("AWS/ApplicationELB", "RequestCount"): _ALB_ANY,
+    ("AWS/ApplicationELB", "TargetResponseTime"): _ALB_ANY,
+    ("AWS/ApplicationELB", "HTTPCode_Target_5XX_Count"): _ALB_ANY,
+    ("AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count"): _ALB_LB,
+    ("AWS/ApplicationELB", "HealthyHostCount"): _ALB_TG,
+    ("AWS/ApplicationELB", "UnHealthyHostCount"): _ALB_TG,
+    ("AWS/AutoScaling", "GroupDesiredCapacity"): _ASG,
+    ("AWS/AutoScaling", "GroupInServiceInstances"): _ASG,
+    ("AWS/EC2", "CPUUtilization"): _ASG | {frozenset({"InstanceId"}), frozenset()},
+    ("AWS/RDS", "CPUUtilization"): _RDS,
+    ("AWS/RDS", "DatabaseConnections"): _RDS,
+    ("AWS/RDS", "FreeStorageSpace"): _RDS,
+}
+# Namespaces kb-mcp publishes itself (MetricsMode api or emf) or the CloudWatch agent would.
+CUSTOM_NAMESPACES = {"KbMcp", "CWAgent"}
+
+
+def _alarm_metrics(props: dict[str, Any]) -> list[tuple[str, str, frozenset[str]]]:
+    def one(m: dict[str, Any]) -> tuple[str, str, frozenset[str]]:
+        return m["Namespace"], m["MetricName"], frozenset(d["Name"] for d in m.get("Dimensions", []))
+
+    if "MetricName" in props:
+        return [one(props)]
+    return [one(q["MetricStat"]["Metric"]) for q in props.get("Metrics", []) if "MetricStat" in q]
+
+
+def _dashboard_metrics(body: Any) -> list[tuple[str, str, frozenset[str]]]:
+    text = body["Fn::Sub"][0] if isinstance(body["Fn::Sub"], list) else body["Fn::Sub"]
+    doc = json.loads(re.sub(r"\$\{[^}]+\}", "x", text))
+    found = []
+    for widget in doc["widgets"]:
+        for row in widget.get("properties", {}).get("metrics", []):
+            parts = [p for p in row if not isinstance(p, dict)]
+            assert "." not in parts, f"dashboard shorthand '.' is not handled here: {row}"
+            found.append((parts[0], parts[1], frozenset(parts[2::2])))
+    return found
+
+
+def _all_template_metrics() -> list[tuple[str, str, str, frozenset[str]]]:
+    out = []
+    for name, res in load("app.yaml")["Resources"].items():
+        if res["Type"] == "AWS::CloudWatch::Alarm":
+            out += [(name, *m) for m in _alarm_metrics(res["Properties"])]
+        elif res["Type"] == "AWS::CloudWatch::Dashboard":
+            out += [(name, *m) for m in _dashboard_metrics(res["Properties"]["DashboardBody"])]
+    return out
+
+
+def test_every_alarm_and_dashboard_metric_is_one_aws_publishes() -> None:
+    metrics = _all_template_metrics()
+    assert len({m[0] for m in metrics}) >= 12  # every alarm and the three dashboards were found
+    wrong = []
+    for resource, namespace, metric, dims in metrics:
+        if namespace in CUSTOM_NAMESPACES:
+            continue
+        allowed = AWS_METRICS.get((namespace, metric))
+        if allowed is None:
+            wrong.append(f"{resource}: {namespace} {metric} is not in the table of documented metrics")
+        elif dims not in allowed:
+            wrong.append(f"{resource}: {namespace} {metric} is never published with dimensions {sorted(dims)}")
+    assert not wrong, "\n".join(wrong)
+
+
+def test_every_auto_scaling_metric_used_is_collected_by_the_group() -> None:
+    """AWS/AutoScaling group metrics exist only for the metrics named in MetricsCollection."""
+    resources = load("app.yaml")["Resources"]
+    (asg,) = [r for r in resources.values() if r["Type"] == "AWS::AutoScaling::AutoScalingGroup"]
+    collected = {m for c in asg["Properties"]["MetricsCollection"] for m in c["Metrics"]}
+    used = {m[2] for m in _all_template_metrics() if m[1] == "AWS/AutoScaling"}
+    assert used and used <= collected, used - collected
+
+
+def test_custom_metric_alarms_exist_only_when_the_app_publishes_metrics() -> None:
+    """Phase 25.6: an alarm on KbMcp or CWAgent never gets data with MetricsMode off."""
+    resources = load("app.yaml")["Resources"]
+    for name, res in resources.items():
+        if res["Type"] != "AWS::CloudWatch::Alarm":
+            continue
+        if any(m[0] in CUSTOM_NAMESPACES for m in _alarm_metrics(res["Properties"])):
+            assert "Condition" in res, f"{name} alarms on a custom metric without a condition"

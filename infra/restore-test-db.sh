@@ -146,29 +146,6 @@ HOST="$(aws_r rds describe-db-instances --db-instance-identifier "$TARGET_ID" \
   --query 'DBInstances[0].Endpoint.Address' --output text)"
 
 step "checking the copy from the laptop"
-KB_RESTORE_HOST="$HOST" KB_RESTORE_PASSWORD_FILE="$PASSWORD_FILE" "$PYTHON" -I - << 'PY'
-import os
-import psycopg
-
-password = open(os.environ["KB_RESTORE_PASSWORD_FILE"], encoding="utf-8").read().strip()
-conn = psycopg.connect(
-    host=os.environ["KB_RESTORE_HOST"], port=5432, dbname="kb", user="kbadmin",
-    password=password, sslmode="require", connect_timeout=15,
-)
-q = lambda sql: conn.execute(sql).fetchone()[0]  # noqa: E731
-docs, chunks = q("SELECT count(*) FROM docs"), q("SELECT count(*) FROM chunks")
-embedded = q("SELECT count(*) FROM chunks WHERE embedding IS NOT NULL")
-vector = q("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
-latest = q("SELECT max(updated_at) FROM docs")
-ok = docs > 0 and chunks > 0 and embedded == chunks and vector is not None
-if embedded:
-    # A real cosine query over the restored vectors, as search runs it.
-    q("SELECT c.id FROM chunks c, (SELECT embedding FROM chunks WHERE embedding IS NOT NULL LIMIT 1) s "
-      "ORDER BY c.embedding <=> s.embedding LIMIT 5")
-conn.close()
-print(f"restored copy: {docs} docs, {chunks} chunks, {embedded} embedded, pgvector {vector}, newest doc {latest}")
-print("RESTORE CHECK PASSED" if ok else "RESTORE CHECK FAILED")
-raise SystemExit(0 if ok else 1)
-PY
+"$PYTHON" -I "$ROOT/infra/scripts/verify_restore.py" --host "$HOST" --password-file "$PASSWORD_FILE"
 DONE=$(date +%s)
 step "restore and check took $(((DONE - START) / 60)) min $(((DONE - START) % 60)) s (record this as the measured RTO part)"

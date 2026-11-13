@@ -21,19 +21,20 @@ Everything else (models, image, code) can be rebuilt; only the documents, chunks
 | Laptop copy (`~/.config/kb-mcp/kb-latest.db.gz` plus `~/.config/kb-mcp/saved/kb-<UTC time>.db.gz`) | The operator's laptop, outside the repo | The operator: `infra/up.sh save` | Before every session end and before class | The newest 14 dated copies | Yes | **Yes: the only copy that does** |
 | `sqlite` mode: S3 snapshot plus nightly `backups/` | `kb-data` bucket | The app (`kb/snapshot.py`, cron `backup`) | After every write, nightly | 30 days | n/a | No |
 
-**AWS Academy sandbox resets.** A timed-out or reset lab session can come back as a new, empty account (seen twice, 2026-10-09). That deletes every stack, the RDS instance, its automated backups, every RDS snapshot and the S3 bucket with all its versions. Only the laptop copy survives. Treat `infra/up.sh save` as part of ending every session, and keep a second copy of `~/.config/kb-mcp/saved/` somewhere else (another disk or cloud drive) if the data matters. Read "Known gap in `infra/up.sh save`" below first: until phase 26 fixes it, a save can replace the only good copy.
+**AWS Academy sandbox resets.** A timed-out or reset lab session can come back as a new, empty account (seen twice, 2026-10-09). That deletes every stack, the RDS instance, its automated backups, every RDS snapshot and the S3 bucket with all its versions. Only the laptop copy survives. Treat `infra/up.sh save` as part of ending every session, and keep a second copy of `~/.config/kb-mcp/saved/` somewhere else (another disk or cloud drive) if the data matters. Since phase 26 a save checks the download before it replaces the laptop copy (below).
 
-## Known gap in `infra/up.sh save` (open, found 2026-11-09, fix planned in phase 26)
+## How `infra/up.sh save` protects the laptop copy (phase 26)
 
-`save_snapshot` in `infra/up.sh` downloads `snapshots/kb-latest.db.gz` and moves it over `~/.config/kb-mcp/kb-latest.db.gz` **before** anything checks it, and the dated copy in `saved/` is made from the new file, not the old one. Nothing tests the download (gzip, `integrity_check`, document count). If the bucket holds an empty or damaged database (for example after a deploy that started empty, or a bad import), one save replaces the last good laptop copy, and in a reset sandbox that copy is the only one left. As of 2026-11-09 the only known copy of the corpus is the Oct 14 file (63 documents, 761 chunks) and `saved/` does not exist yet.
+Found 2026-11-09 and fixed in phase 26: `save` used to move the download over `kb-latest.db.gz` before checking it. Now, in this order:
 
-Until the fix (`docs/FINAL_PROJECT_ROADMAP.md`, phase 26) lands:
+1. Before anything else (even the credentials check), the current `kb-latest.db.gz` is copied to `saved/kb-<UTC time>-before.db.gz`, unless an identical copy is already in `saved/`.
+2. The bucket snapshot is downloaded to `kb-latest.db.gz.tmp` and checked with `infra/scripts/check_sqlite_copy.py` (standard library Python): readable gzip, `PRAGMA integrity_check` is `ok`, the `docs` and `chunks` tables exist.
+3. The document count must be at least the current copy's. A smaller count stops the save with the two numbers; `infra/up.sh save --force` accepts it when the deletions were intended. A damaged download is refused even with `--force`.
+4. Only then does the download replace `kb-latest.db.gz` and get its own dated copy. On any refusal the old file is byte-identical and the temporary file is deleted.
 
-1. Do not run `infra/up.sh save` unless you need to. Never run it right after a deploy that reported "the app starts empty".
-2. If you must save, first copy the current file somewhere `save` never touches: `cp -p ~/.config/kb-mcp/kb-latest.db.gz ~/kb-latest-before-save-$(date -u +%Y%m%dT%H%M%SZ).db.gz`.
-3. After the save, check the new file before trusting it: `gzip -t ~/.config/kb-mcp/kb-latest.db.gz`, then decompress it to a temporary file and check `PRAGMA integrity_check` and `SELECT count(*) FROM docs` against what you expect. If either fails, put the copy from step 2 back.
+If the current laptop copy is itself damaged, the save says so and any intact download replaces it (the damaged file is still kept in `saved/`). Keeping a second copy of `saved/` on another disk or cloud drive is still recommended: the laptop is the only copy that survives a sandbox reset.
 
-The planned fix: copy the current file into `saved/` first, download to a temporary file, check gzip, integrity and the document count, and keep the old file when the check fails or the count drops (unless forced).
+**The scheduled export claim window.** With `--once-per 3600` the instance that claims the nightly export records the time first; if that instance is killed after claiming and before the upload finishes (a failed upload releases the claim, a killed process cannot), no other instance runs the scheduled export until the hour has passed, so that night has no export. `POST /api/admin/export` and `infra/up.sh save` are never blocked by the claim.
 
 ## Recovery objectives
 
@@ -123,9 +124,10 @@ Cost: about 0.017 USD per hour for the instance plus a few cents of storage; 20 
 | Item | State |
 | --- | --- |
 | 7 day retention, Snapshot policies, deletion protection, backup and maintenance windows, `kb-DbInstanceId` export | Implemented and tested in `infra/db.yaml` (`tests/test_infra.py`, cfn-lint); **not deployed** |
-| `infra/teardown-db.sh`, dated laptop copies in `infra/up.sh save` | Implemented and tested with stub AWS commands; not run against AWS. **Known gap:** the dated copy is made from the new download, after the old file is replaced, and the download is not checked (see "Known gap in `infra/up.sh save`"; fix planned in phase 26) |
+| `infra/teardown-db.sh`, dated laptop copies in `infra/up.sh save` | Implemented and tested with stub AWS commands; not run against AWS. `save` keeps the old copy and checks the download first (phase 26, `tests/test_infra.py`) |
 | Lab permissions for modify, snapshot, restore and delete | Allowed by the IAM policy simulator (`infra/probe-rds.sh` section 8, 2026-11-08) for gp2 at 20 GB; a real call is the final answer |
 | 7 day retention accepted by the lab | Unknown until `kb-db` is deployed (no condition key covers it); fall back with `KB_DB_BACKUP_DAYS` if refused |
-| RDS point-in-time restore | **Not tested.** `infra/restore-test-db.sh` is written and stub-tested; it needs a deployed `kb-db` and approval |
+| RDS point-in-time restore | **Not tested against AWS.** `infra/restore-test-db.sh` is written and stub-tested; its check (`infra/scripts/verify_restore.py`) is tested against a local PostgreSQL (phase 26, `tests/test_restore_check.py`); the restore itself needs a deployed `kb-db` and approval |
+| Switch back from PostgreSQL to SQLite (export restored by the SQLite boot path) | Tested locally end to end, vectors byte-identical, semantic search without a backfill (phase 26, `tests/test_portable.py`); not run against AWS |
 | Restore from an export (`import-sqlite` at boot) | Exercised on every rebuild in phases 20 to 24 (account `983926826929`): 784 chunks back each time |
 | RPO and RTO numbers above | Estimates from AWS documentation and earlier deploy times, except the rebuild time (measured 26 minutes, phase 24) |
