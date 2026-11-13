@@ -68,13 +68,9 @@ Phase 1 (00 to 16, plus the upload links) is the working single-instance prototy
 | 24 | [Final README, extension, submission](24-final-wrap.md) | Wed Nov 11 to Thu Nov 12 | local + AWS | 23, 23a | extension, run3 Locust (50 users), MCP write decision, rehearsal, video | 1st: extension; 3rd: full DEMO.md |
 | 25 | [Product priorities: shared search, scale-out, health, auth, backups, alarms](25-product-priorities.md) | done locally Nov 8 (not deployed) | local, then AWS (approval needed) | 24 | approve deploys and the restore test, confirm SNS email | |
 | 26 | [Data safety and local test gaps](26-data-safety.md) | done Nov 13 | local | 25 | | |
-| 27 | Deployment readiness (planned) | not started | local, read-only AWS | 25 | enable Docker in WSL; approve a CI run | |
-| 28 | Security hardening (planned, optional) | not started | local | 27 | decide scope | first to cut |
-| 29 | Live SQLite deployment and verification (planned) | not needed for this submission (user tests live before the demo) | AWS (approval needed) | 26, 27 | fresh credentials, SNS email, MCP config | |
-| 30 | Temporary PostgreSQL session (planned, optional) | not started | AWS (approval needed) | 29 | approve each step, failover and restore test separately | cut before 29 |
-| 31 | Final documentation and presentation (planned) | not started | local | 29 | deck, rehearsal | |
+| 27 | [Final wrap-up](27-final-wrap-up.md) | next | local | 26, live test of Nov 13 (done) | deck, rehearsal | |
 
-Phases 26 to 31 have no phase files yet; their scope, files, tests and completion criteria are in `docs/FINAL_PROJECT_ROADMAP.md` (section 7). Write each phase file when the phase is approved.
+The planned phases 27 to 31 of `docs/FINAL_PROJECT_ROADMAP.md` were replaced on Nov 13 (user decision) by one final wrap-up, the new phase 27. A live test of the `postgres` mode ran the same day; its results are in the phase 27 file.
 
 Replanned Nov 6: 19 and 20 finished early (Oct 29), then a week passed, so there is no buffer day left. Submit Fri Nov 13. Phase 18 (the Lambda) is dropped: EventBridge is not on the sandbox list.
 
