@@ -202,6 +202,8 @@ Order: protect the data first, then close local test gaps, then make deployments
 
 ### Phase 26: Data safety and local test gaps
 
+**Done 2026-11-13** (`docs/phases/26-data-safety.md`, `docs/PROGRESS.md` phase log row 26).
+
 - **Objective:** no command can lose the corpus, and every phase 25 behavior has a committed test.
 - **Why:** finding 1 is the only known risk of irreversible data loss; the test gaps are in code that will be deployed next.
 - **Files:** `infra/up.sh`, `infra/restore-test-db.sh`, a new `infra/verify_restore.py` (or a module under `kb/`), `tests/test_infra.py`, `tests/test_portable.py`, `tests/test_health.py`, `tests/test_backup.py`, `docs/RECOVERY.md`, `docs/phases/26-*.md`, `docs/PROGRESS.md`.
@@ -237,6 +239,8 @@ Order: protect the data first, then close local test gaps, then make deployments
 - **AWS or cost:** none. **Approval:** yes, including whether it is in scope.
 
 ### Phase 29: Live SQLite deployment and verification
+
+**Not needed for this submission** (user decision, 2026-11-13: no video is required; the user will test live before the demo). Kept as the checklist for that test.
 
 - **Objective:** prove the default architecture in this account and collect the presentation evidence.
 - **Why:** nothing has been verified live in this account since phase 25; the demo depends on it.
@@ -297,7 +301,7 @@ Required cleanup after each session: `infra/up.sh save`; `infra/teardown-app.sh`
 
 | Risk | Likelihood | Impact | Mitigation |
 | --- | --- | --- | --- |
-| Corpus lost through `up.sh save` | Medium once deploys start | Severe, irreversible | Phase 26 first; until then, never run `save`, and consider a manual dated copy of the backup (approval) |
+| Corpus lost through `up.sh save` | Medium once deploys start | Severe, irreversible | Phase 26 fixed it (2026-11-13): the old copy is kept and a damaged or smaller download is refused |
 | No Docker, so no deploy | Certain today | Blocks 29 and 30 | D1 (HUMAN) |
 | Lab permissions differ from the simulator | Medium | A failed deploy, leftovers | Preflight (D4), leftover check (D6) |
 | pgvector 0.8 behaves differently from 0.6.2 | Low | PostgreSQL mode broken | T1 before merge or phase 30 |
@@ -310,12 +314,12 @@ Dependencies: 26 and 27 have none; 28 needs 27; 29 needs 26, 27, D1 and D2; 30 n
 
 ## 11. Final project completion checklist
 
-- [ ] Phase 26: save path safe; T2 to T8 committed and passing
+- [x] Phase 26: save path safe; T2 to T8 committed and passing (2026-11-13)
 - [ ] Phase 27: preflight, S3 template upload, leftover check, clean image tag
 - [ ] CI green on the branch, including PostgreSQL legs on pgvector 0.8 (approval for push and PR)
 - [ ] Phase 28 done or explicitly out of scope
 - [ ] Docker in WSL enabled (HUMAN)
-- [ ] Phase 29: live SQLite deployment verified, evidence collected, torn down, no leftovers
+- [ ] Phase 29: live SQLite deployment verified, evidence collected, torn down, no leftovers (not needed for this submission; the user tests live before the demo)
 - [ ] Laptop backup still intact (63 documents) after the live session, plus a dated copy
 - [ ] Phase 30 done or explicitly skipped (with the historical evidence labeled)
 - [ ] Claude Code MCP entry updated or removed (HUMAN)
@@ -326,7 +330,7 @@ Dependencies: 26 and 27 have none; 28 needs 27; 29 needs 26, 27, D1 and D2; 30 n
 
 ## 12. Decisions needed
 
-1. Approve phase 26 (local), starting with the save fix.
+1. Done 2026-11-13: phase 26.
 2. Optionally approve a one-time manual dated copy of `~/.config/kb-mcp/kb-latest.db.gz` (a copy only; the original is not touched).
 3. Enable Docker Desktop WSL integration (HUMAN).
 4. Approve phase 27, and separately a draft pull request or a manual workflow run so CI runs (the branch push itself is done).

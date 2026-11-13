@@ -67,10 +67,10 @@ Phase 1 (00 to 16, plus the upload links) is the working single-instance prototy
 | 23a | [Health check and admission control under load](23a-health-under-load.md) | done Nov 6 | laptop + AWS | 23 | run Locust | |
 | 24 | [Final README, extension, submission](24-final-wrap.md) | Wed Nov 11 to Thu Nov 12 | local + AWS | 23, 23a | extension, run3 Locust (50 users), MCP write decision, rehearsal, video | 1st: extension; 3rd: full DEMO.md |
 | 25 | [Product priorities: shared search, scale-out, health, auth, backups, alarms](25-product-priorities.md) | done locally Nov 8 (not deployed) | local, then AWS (approval needed) | 24 | approve deploys and the restore test, confirm SNS email | |
-| 26 | Data safety and local test gaps (planned) | not started | local | 25 | approve start | |
+| 26 | [Data safety and local test gaps](26-data-safety.md) | done Nov 13 | local | 25 | | |
 | 27 | Deployment readiness (planned) | not started | local, read-only AWS | 25 | enable Docker in WSL; approve a CI run | |
 | 28 | Security hardening (planned, optional) | not started | local | 27 | decide scope | first to cut |
-| 29 | Live SQLite deployment and verification (planned) | not started | AWS (approval needed) | 26, 27 | fresh credentials, SNS email, MCP config | |
+| 29 | Live SQLite deployment and verification (planned) | not needed for this submission (user tests live before the demo) | AWS (approval needed) | 26, 27 | fresh credentials, SNS email, MCP config | |
 | 30 | Temporary PostgreSQL session (planned, optional) | not started | AWS (approval needed) | 29 | approve each step, failover and restore test separately | cut before 29 |
 | 31 | Final documentation and presentation (planned) | not started | local | 29 | deck, rehearsal | |
 

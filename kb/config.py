@@ -164,8 +164,20 @@ def load_database_url(bucket: str, key: str, region: str) -> str:
             return cached
         import boto3  # imported lazily so the env path never touches AWS
 
+        from botocore.exceptions import BotoCoreError, ClientError
+
         client = boto3.client("s3", region_name=region)
-        resp = client.get_object(Bucket=bucket, Key=key)
+        try:
+            resp = client.get_object(Bucket=bucket, Key=key)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "error")
+            # Stop startup with the place to look; never fall back to an empty SQLite database.
+            raise RuntimeError(
+                f"cannot read the database URL from s3://{bucket}/{key} ({code});"
+                " infra/up.sh writes it when it deploys kb-db"
+            ) from exc
+        except BotoCoreError as exc:
+            raise RuntimeError(f"cannot read the database URL from s3://{bucket}/{key}: {exc}") from exc
         url = resp["Body"].read().decode("utf-8").strip()
         _cached_db_urls[(bucket, key)] = url
         log.info("database url loaded", extra={"database_url_source": "s3", "key": key})
